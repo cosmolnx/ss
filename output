@@ -1,4 +1,159 @@
-         # is safely retried up to max_retries exactly like any other
+
+PS C:\Users\nukra\Lanux> git diff --numstat
+warning: in the working copy of 'agent/core/controller.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'agent/core/model_agent.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'agent/core/result.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'agent/core/specialists/_common.py', LF will be replaced by CRLF the next timeGit touches it
+warning: in the working copy of 'agent/core/task_manager.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'agent/core/tool_registry.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_task_verification_s8.py', LF will be replaced by CRLF the next time Git touches it
+9       0       agent/core/controller.py
+7       1       agent/core/model_agent.py
+15      1       agent/core/result.py
+8       0       agent/core/specialists/_common.py
+33      161     agent/core/task_manager.py
+182     2       agent/core/tool_registry.py
+10      1       tests/test_security_boundaries.py
+389     82      tests/test_task_verification_s8.py
+
+PS C:\Users\nukra\Lanux> git diff --unified=3 -- agent/core/tool_registry.py agent/core/task_manager.py
+warning: in the working copy of 'agent/core/task_manager.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'agent/core/tool_registry.py', LF will be replaced by CRLF the next time Git touches it
+diff --git a/agent/core/task_manager.py b/agent/core/task_manager.py
+index c77f5a1..12c0e98 100644
+--- a/agent/core/task_manager.py
++++ b/agent/core/task_manager.py
+@@ -642,11 +642,14 @@ class TaskManager:
+                              "(build_default_registry() was called without a `knowledge` store).",
+                 }
+ 
+-        if task_type == TaskType.WRITE_FILE:
+-            return self._execute_write_file_with_verification(call, ctx, approval_response)
+-        if task_type == TaskType.EDIT_FILE:
+-            return self._execute_edit_file_with_verification(call, ctx, approval_response)
+-
++        # S.8 follow-up (ToolRegistry-seam integration): WRITE_FILE and
++        # EDIT_FILE no longer get special-cased here. ToolRegistry.
++        # invoke() itself now runs verification for these two tool names
++        # (see agent/core/tool_registry.py's ToolSpec.verifier), so they
++        # flow through the exact same generic path as every other
++        # TaskType — this is what makes verification apply identically
++        # whether a subtask reaches this fallback dispatch OR a
++        # specialist's run_plan_via_registry(), instead of only here.
+         tr = ctx.tool_registry.invoke(call.tool_name, call.tool_args, ctx, approval_response)
+         return self._from_tool_result(tr, evaluator=call.evaluator)
+ 
+@@ -659,13 +662,18 @@ class TaskManager:
+             "error": tr.error,
+             "output": tr.output,
+             "raw": tr.raw,
+-            # Phase S.8 — default for every TaskType that has no
+-            # evaluator attached (the vast majority: reads, research,
+-            # github, secrets, computer.*) and for every execution
+-            # failure (an evaluator never runs against tr.success=False,
+-            # matching the "execution failure -> NOT_ATTEMPTED" rule —
+-            # verification was genuinely never attempted in either case).
+-            "verification_state": VerificationState.NOT_ATTEMPTED.value,
+:
++            # S.8 follow-up (ToolRegistry-seam integration): read
++            # straight from the ToolResult ToolRegistry.invoke() already
++            # populated. For every TaskType whose ToolSpec has no
++            # verifier (the vast majority: reads, research, github,
++            # secrets, computer.*) and for every execution failure,
++            # tr.verification_state is already NOT_ATTEMPTED (ToolResult's
++            # own dataclass default) — so this is a pure pass-through
++            # with zero behavior change for anything except WRITE_FILE/
++            # EDIT_FILE, which now get their real, registry-computed
++            # verdict here instead of a value this method used to compute
++            # itself.
++            "verification_state": tr.verification_state.value,
+         }
+         if tr.success and evaluator is not None and isinstance(tr.raw, dict):
+             outcome = evaluator(tr.raw)
+@@ -684,155 +692,19 @@ class TaskManager:
+             )
+         return base
+ 
+-    def _record_verification_event(
+-        self, ctx: ExecutionContext, state: VerificationState, detail: str,
+-    ) -> None:
+-        """
+-        Phase S.8 — the only two verification_state values that get a
+-        dedicated audit entry (see VerificationState's own docstring for
+-        why NOT_ATTEMPTED/VERIFIED don't: the former is the routine
+-        no-op case, the latter is already represented by the existing
+-        action="executed" entry ToolRegistry.invoke() writes). Mirrors
+-        that same entry's actor/task_id/subtask_id/originator sourcing
+-        exactly — read directly from `ctx`, not from a Task object,
+-        since this fires from inside _execute_plan(), which — like
+-        ToolRegistry.invoke() itself — only ever has `ctx`, not the
+-        full Task. `detail` must stay short and generic: never file
+-        contents, never raw tool output — only a fixed description of
+-        which check failed or couldn't be completed.
+-        """
+-        if self.audit_log is None:
+-            return
+-        assert state in (VerificationState.FAILED, VerificationState.INCONCLUSIVE)
+-        action = "verification_failed" if state is VerificationState.FAILED else "verification_inconclusive"
+-        self.audit_log.record(
+-            actor=ctx.actor, action=action, task_id=ctx.task_id, subtask_id=ctx.subtask_id,
+-            detail=detail, originator=ctx.trust_origin,
+-        )
+-
+-    def _read_back(self, path: str, ctx: ExecutionContext) -> tuple[bool, str | None]:
+-        """
+-        Phase S.8 — the one and only way verification ever observes
+-        filesystem state: through ctx.tool_registry.invoke("filesystem.
+-        read_file", ...), the exact same authorized path any ordinary
+-        READ_FILE subtask already uses. Never a raw `open()` call —
+-        this is what keeps verification inside Sandbox/PermissionGateway
+-        rather than bypassing them (SAFE-risk, auto-approved, so passing
+-        approval_response=None here is correct and matches how every
+-        other SAFE tool call in this codebase is invoked).
+-
+-        Returns (succeeded, content). `succeeded=False` (content=None)
+-        covers every reason the read-back could fail — file vanished,
+-        sandbox violation, anything — deliberately without
+-        distinguishing which, since all of them mean the same thing for
+-        verification purposes: the observation could not be completed,
+-        i.e. INCONCLUSIVE, never silently treated as a content mismatch.
+-
+-        This is also the one place S.8's TOCTOU limitation is real and
+-        unavoidable: the content observed here reflects the file's state
+-        at the moment of THIS call, not a guarantee about any instant
+-        before or after it. No new locking is introduced to close that
+-        window — see the module-level note near VerificationState.
+-        """
+-        read_tr = ctx.tool_registry.invoke("filesystem.read_file", {"path": path}, ctx, None)
+-        if not read_tr.success:
+-            return False, None
+-        return True, read_tr.output
+-
+-    def _execute_write_file_with_verification(self, call, ctx: ExecutionContext, approval_response) -> dict:
+-        tr = ctx.tool_registry.invoke(call.tool_name, call.tool_args, ctx, approval_response)
+-        result = self._from_tool_result(tr, evaluator=call.evaluator)
+-        if not tr.success:
+-            return result  # NOT_ATTEMPTED, already set by _from_tool_result
+-
+-        expected_content = call.tool_args.get("content", "")
+-        path = call.tool_args.get("path")
+-        read_ok, observed_content = self._read_back(path, ctx)
+:
+-        if not read_ok:
+-            result["verification_state"] = VerificationState.INCONCLUSIVE.value
+-            self._record_verification_event(
+-                ctx, VerificationState.INCONCLUSIVE,
+-                "could not read the file back after write_file to verify its content",
+-            )
+-        elif observed_content == expected_content:
+-            result["verification_state"] = VerificationState.VERIFIED.value
+-        else:
+-            result["verification_state"] = VerificationState.FAILED.value
+-            # Phase S.8: flip success to False so this flows through
+-            # _run_subtask's EXISTING, unmodified retry-or-fail logic —
+-            # is_retryable(WRITE_FILE) is True (idempotent — see
+-            # recovery.py's own docstring), so a content mismatch here
+-            # is safely retried up to max_retries exactly like any other
 -            # execution failure, with zero new branching needed.
 -            result["success"] = False
 -            self._record_verification_event(
@@ -84,6 +239,8 @@
 +    # — only where the check physically runs.
  
      def _summarize(self, task: Task) -> str:
+:
+     def _summarize(self, task: Task) -> str:
          lines = []
 diff --git a/agent/core/tool_registry.py b/agent/core/tool_registry.py
 index 44da58c..3ce6c8e 100644
@@ -119,6 +276,7 @@ index 44da58c..3ce6c8e 100644
 +    # invoke() calls it up to twice per successful handler call:
 +    #   phase="pre"  — immediately BEFORE the handler runs (state=None,
 +    #                  tr=None). Exists only because a mutating tool
+:
 +    #                  (edit_file) needs a snapshot of prior state that
 +    #                  is unrecoverable once the handler has run; a
 +    #                  verifier that needs no prior state (write_file)
@@ -157,6 +315,7 @@ index 44da58c..3ce6c8e 100644
 +        # to capture (write_file's) simply returns None, at zero cost.
 +        # If the handler goes on to fail or raise, this pre-state is
 +        # silently discarded below — matching the existing, unmodified
+:
 +        # rule that verification never produces a verdict for an
 +        # execution failure.
 +        pre_verification_state = None
@@ -195,6 +354,7 @@ xecutionContext):
 +        never letting an unexpected exception inside a verifier escape
 +        into the caller — mirrors this same module's own
 +        "never let a tool handler crash the caller" philosophy in
+:
 +        invoke()'s except blocks. A "pre"-phase exception yields no
 +        pre-state (None); a "post"-phase exception yields INCONCLUSIVE,
 +        never a false VERIFIED/FAILED verdict.
@@ -234,6 +394,7 @@ e"
 +
 +
 +# ----------------------------------------------------------------------
+:
 +# S.8 follow-up — the two verifiers in this phase's exact scope, plus
 +# their shared read-back helper. Module-level (not ToolRegistry methods)
 +# since they need no registry state beyond what's passed to them, and
@@ -271,8 +432,7 @@ e"
 +    path = args.get("path")
 +    read_ok, observed_content = _verification_read_back(path, ctx)
 +    if not read_ok:
-+        return VerificationState.INCONCLUSIVE, "could not read the file back after write_file to verify its co
-ntent"
++        return VerificationState.INCONCLUSIVE, "could not read the file back after write_file to verify its co:ntent"
 +    if observed_content == expected_content:
 +        return VerificationState.VERIFIED, ""
 +    return VerificationState.FAILED, "written file content did not match the requested content"
@@ -309,7 +469,7 @@ tent"
 +    return VerificationState.FAILED, "edited file content did not match the expected result"
 +
  
- def build_default_registry(
+  def build_default_registry(
      sandbox: Sandbox, permission_gateway: PermissionGateway, audit_log: AuditLog, knowledge=None,
 @@ -201,6 +376,9 @@ def build_default_registry(
          name="filesystem.read_file", category="filesystem", risk=RiskLevel.SAFE,
@@ -336,6 +496,117 @@ erwrite),
      ))
      registry.register(ToolSpec(
          name="filesystem.delete_file", category="filesystem", risk=RiskLevel.MODERATE,
+
+PS C:\Users\nukra\Lanux> git diff --unified=3 -- agent/core/controller.py agent/core/model_agent.py agent/core/result.py agent/core/specialists/_common.py tests/test_security_boundaries.py tests/test_task_verification_s8.py
+warning: in the working copy of 'agent/core/controller.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'agent/core/model_agent.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'agent/core/result.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'agent/core/specialists/_common.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_task_verification_s8.py', LF will be replaced by CRLF the next time Git touches it
+diff --git a/agent/core/controller.py b/agent/core/controller.py
+index 07c6f46..a4cc6ff 100644
+--- a/agent/core/controller.py
++++ b/agent/core/controller.py
+@@ -178,4 +178,13 @@ class LANUXS5Controller:
+             "raw": output.get("raw"),
+             "role": agent_result.role.value,
+             "notes": agent_result.notes,
++            # S.8 follow-up: carried straight through from the
++            # specialist's AgentResult (itself copied from the
++            # underlying ToolResult in tool_result_to_agent_result()) so
++            # TaskManager._run_subtask()'s existing, unmodified
++            # `subtask.verification_state = _safe_verification_state(
++            # result.get("verification_state"))` line now sees a real
++            # value for the specialist-routed path too, not just the
++            # fallback dispatch path.
++            "verification_state": agent_result.verification_state.value,
+         }
+diff --git a/agent/core/model_agent.py b/agent/core/model_agent.py
+index 7fc8b7d..c754055 100644
+--- a/agent/core/model_agent.py
++++ b/agent/core/model_agent.py
+@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
+ from enum import Enum
+ from typing import Protocol, runtime_checkable
+ 
+-from agent.core.result import ExecutionContext, ToolCall
++from agent.core.result import ExecutionContext, ToolCall, VerificationState
+ 
+ 
+ class AgentRole(Enum):
+@@ -47,6 +47,12 @@ class AgentResult:
+     confidence: float | None = None   # None unless model-scored (only ever
+                                        # set by the advisory Planner-Analyst)
+     notes: str = ""
++    # S.8 follow-up (ToolRegistry-seam integration): copied straight
++    # from the underlying ToolResult.verification_state by
++    # tool_result_to_agent_result() — see specialists/_common.py. Stays
++    # NOT_ATTEMPTED for every specialist call that isn't WRITE_FILE/
++    # EDIT_FILE, same as before this integration.
++    verification_state: VerificationState = VerificationState.NOT_ATTEMPTED
+ 
+ 
+ @runtime_checkable
+diff --git a/agent/core/result.py b/agent/core/result.py
+index 47564b5..bb12703 100644
+--- a/agent/core/result.py
++++ b/agent/core/result.py
+@@ -4,7 +4,13 @@ Registry, the Permission Gateway, specialist agents, and the controller.
+ 
+ Kept dependency-free of the rest of agent/core/ (no imports from
+ model_agent.py, tool_registry.py, etc.) so every other module can import
+-from here without circular-import risk.
++from here without circular-import risk. ONE deliberate, narrow exception:
++VerificationState is imported from agent/core/task.py (S.8's existing
++enum, reused as-is, never duplicated) because ToolResult below needs it
++and task.py itself has zero imports from anywhere in agent/core/ — so
++this does not introduce a cycle, it just means "dependency-free of the
++rest of agent/core/" now has this one explicitly-noted exception rather
++than being literally zero-import.
+ """
+ 
+ from __future__ import annotations
+@@ -13,6 +19,8 @@ import time
+ from dataclasses import dataclass, field
+ from typing import Any
+ 
++from agent.core.task import VerificationState
++
+ 
+ @dataclass
+ class ToolCall:
+@@ -42,6 +50,12 @@ class ToolResult:
+     raw: Any = None
+     denied: bool = False            # True if blocked by the Permission Gateway
+     denial_reason: str | None = None
++    # S.8 follow-up (ToolRegistry-seam integration): set ONLY by
++    # ToolRegistry.invoke() itself, after a successful handler call, if
++    # and only if the matched ToolSpec declares a `verifier`. Never set
++    # by a tool handler function. Stays NOT_ATTEMPTED for every tool
++    # with no verifier attached — zero behavior change for all of them.
++    verification_state: VerificationState = VerificationState.NOT_ATTEMPTED
+ 
+ 
+ @dataclass
+diff --git a/agent/core/specialists/_common.py b/agent/core/specialists/_common.py
+index 6332021..f0ddab8 100644
+--- a/agent/core/specialists/_common.py
++++ b/agent/core/specialists/_common.py
+@@ -73,6 +73,14 @@ def tool_result_to_agent_result(subtask, role, tr, evaluator=None) -> AgentResul
+     result = AgentResult(
+         subtask_id=subtask.id, role=role, success=success,
+         output=output, tool_calls_made=[call_record], notes=notes,
++        # S.8 follow-up: copied straight from the ToolResult that
++        # ToolRegistry.invoke() already populated (NOT_ATTEMPTED for
++        # every tool call with no verifier attached — unchanged from
++        # before this integration). This is the one line that makes
++        # every specialist-routed WRITE_FILE/EDIT_FILE call carry a real
++        # verification outcome through to LANUXS5Controller instead of
++        # silently defaulting to NOT_ATTEMPTED.
++        verification_state=tr.verification_state,
+     )
+     # Preserve the exact denial/approval-request shape TaskManager's own
+     # dispatch already relies on, so a caller inspecting
 diff --git a/tests/test_security_boundaries.py b/tests/test_security_boundaries.py
 index 5161085..bbe22a4 100644
 --- a/tests/test_security_boundaries.py
