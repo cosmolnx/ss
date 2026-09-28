@@ -1,286 +1,1040 @@
-
-PS C:\Users\nukra\Lanux> Get-Content .\tests\test_endpoint_gating_s6.py | Select-Object -First 90
-"""
-tests/test_endpoint_gating_s6.py â€” Phase S.6: remaining endpoint gating.
-
-Covers the full auth matrix for every newly-gated route, /api/task's
-MASTER_AUTHENTICATED provenance (and forgery resistance), the legacy
-/api/chat pathway's gating, the closed anonymous-project-registration
-chain, PermissionGateway/CRITICAL-ONCE-only preservation, and a final
-route-table boundary audit.
-"""
-
-from __future__ import annotations
-
-import os
-import sys
-import tempfile
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import pytest
-
-import backend.api as api_module
-from agent.core.task import TrustOrigin
-from tests.conftest import authenticate_test_client, unauthenticated_client, DEFAULT_TEST_MASTER_PASSPHRASE
-
-# (method, path, body) for every route S.6 gates. GET routes ignore body.
-GATED_ROUTES = [
-    ("post", "/api/chat", {"message": "hi"}),
-    ("post", "/api/task", {"message": "list the files"}),
-    ("get", "/api/tasks", None),
-    ("get", "/api/history", None),
-    ("get", "/api/projects", None),
-    ("post", "/api/projects", {"name": "x", "workspace_path": "/tmp"}),
-    ("get", "/api/providers", None),
-    ("post", "/api/providers/active", {"provider_id": "x", "model_id": "y"}),
-    ("get", "/api/approvals/pending", None),
-]
-
-
-@pytest.fixture
-def env(monkeypatch):
-    with tempfile.TemporaryDirectory() as d:
-        monkeypatch.setattr(api_module, "WORKSPACE_ROOT", os.path.join(d, "workspace"))
-        monkeypatch.setattr(api_module, "KNOWLEDGE_PATH", os.path.join(d, "data", "knowledge", "long_term.json"))
-        monkeypatch.setattr(api_module, "PROJECT_MEMORY_PATH", os.path.join(d, "data", "knowledge", "project_memory.json"))
-        monkeypatch.setattr(api_module, "TASK_STORE_PATH", os.path.join(d, "data", "tasks", "tasks.json"))
-        monkeypatch.setattr(api_module, "AUDIT_LOG_PATH", os.path.join(d, "data", "audit", "audit_log.jsonl"))
-        monkeypatch.setattr(api_module, "APPROVAL_STORE_PATH", os.path.join(d, "data", "approvals", "approvals.json"))
-        monkeypatch.setattr(api_module, "PROJECT_STORE_PATH", os.path.join(d, "data", "projects", "projects.json"))
-        monkeypatch.setattr(api_module, "SECRETS_VAULT_PATH", os.path.join(d, "data", "secrets", "vault.json"))
-        monkeypatch.setattr(api_module, "MASTER_VAULT_PATH", os.path.join(d, "data", "master_vault", "vault.json"))
-        monkeypatch.setattr(api_module, "TOKENIZER_PATH", os.path.join(d, "no_tokenizer.json"))
-        monkeypatch.setattr(api_module, "CHECKPOINT_PATH", os.path.join(d, "no_checkpoint.pt"))
-        os.makedirs(os.path.join(d, "workspace"), exist_ok=True)
-
-        finish_auth = authenticate_test_client(monkeypatch, api_module)
-        app = api_module.create_app()
-        app.config["TESTING"] = True
-        with app.test_client() as client:
-            token = finish_auth(app, client)
-            yield {"client": client, "app": app, "dir": d, "token": token}
-
-
-def _call(client, method, path, body):
-    fn = getattr(client, method)
-    return fn(path, json=body) if body is not None else fn(path)
-
-
-# ------------------------- A. route authentication matrix -------------------------
-
-@pytest.mark.parametrize("method,path,body", GATED_ROUTES)
-def test_missing_authorization_rejected(env, method, path, body):
-    client = unauthenticated_client(env["app"])
-    resp = _call(client, method, path, body)
-    assert resp.status_code == 401
-
-
-@pytest.mark.parametrize("method,path,body", GATED_ROUTES)
-def test_malformed_authorization_rejected(env, method, path, body):
-    client = unauthenticated_client(env["app"])
-    for bad in ["not-a-bearer-token", "Basic abc123", "Bearer", "bearer " + env["token"]]:
-        fn = getattr(client, method)
-        resp = fn(path, json=body, headers={"Authorization": bad}) if body is not None else \
-            fn(path, headers={"Authorization": bad})
-        assert resp.status_code == 401
-
-
-@pytest.mark.parametrize("method,path,body", GATED_ROUTES)
-def test_invalid_token_rejected(env, method, path, body):
-    client = unauthenticated_client(env["app"])
-    fn = getattr(client, method)
-PS C:\Users\nukra\Lanux> Get-Content .\agent\core\audit.py | Select-Object -First 260
-"""
-agent/core/audit.py â€” append-only audit trail for every tool invocation
-LANUX-S5's Agent Core makes, whether auto-approved, approved, denied, or
-blocked by the Sandbox underneath.
-
-Storage format follows the exact pattern already used by
-self_improvement/experiment.py's ExperimentLog/_log() â€” one JSON object per
-line, appended, never rewritten or truncated â€” rather than inventing a new
-persistence mechanism. This keeps the audit log human-readable and
-inspectable with any text tool, consistent with the project's existing
-"no cloud service, no opaque binary store" philosophy (see agent/memory.py).
-"""
-
-from __future__ import annotations
-
-import json
-import os
-import time
-import uuid
-from dataclasses import asdict, dataclass, field
-
-
-@dataclass
-class AuditEntry:
-    id: str
-    timestamp: float
-    task_id: str | None
-    subtask_id: str | None
-    actor: str                  # "LANUX-S5" | "<AgentRole value>" | "user" | "system"
-    tool_name: str | None
-    risk: str | None            # RiskLevel.value, kept as str here to avoid
-                                 # a hard import dependency on permissions.py
-    action: str                 # "auto_approved" | "approval_requested" |
-                                 # "approved" | "denied" | "expired" |
-                                 # "cancelled" | "executed" |
-                                 # "blocked_by_sandbox" | "error"
-    detail: str = ""
-    # Phase S.5 â€” deliberately a SEPARATE concept from `actor` above, never
-    # conflated with it:
-    #   `actor`      = who/what actually PERFORMED this operation (a
-    #                    component or role â€” "LANUX-S5", an AgentRole
-    #                    value, "system"). Can legitimately change several
-    #                    times across one task's execution (e.g. as the
-    #                    Controller routes a subtask to different
-    #                    specialists) â€” see ExecutionContext.actor, which
-    #                    the Controller mutates per routing decision.
-    #   `originator` = the AUTHENTICATED PROVENANCE of the task this
-    #                    operation happened under â€” i.e. the Task's own
-    #                    trust_origin (agent.core.task.TrustOrigin), fixed
-    #                    once when the Task was created and never mutated
-    #                    afterward. Valid values are exactly
-    #                    "MASTER_AUTHENTICATED" and "LOCAL_UNAUTHENTICATED"
-    #                    (kept as plain str here for the same reason `risk`
-    #                    above is: to avoid a hard import dependency on
-    #                    agent.core.task). None means "no known task
-    #                    provenance for this entry" (e.g. a system-level
-    #                    maintenance record with no task_id at all, or a
-    #                    legacy entry recorded before this field existed) â€”
-    #                    NEVER interpreted as authenticated, and NEVER
-    #                    upgraded to a real value by guessing.
-    #
-    # `originator` is set exactly once, by AuditLog.record() below, from
-    # server-side state that ultimately traces back to Task.trust_origin
-    # (or a TaskStore lookup keyed by task_id when no live Task object is
-    # available, e.g. during startup recovery) â€” never from a caller-
-    # supplied free-form string, never from model output, never from a
-    # specialist, and never from request/model/file/web content. See
-    # AuditLog.record()'s docstring for the validation this relies on.
-    originator: str | None = None
-
-
-def _new_id() -> str:
-    return f"audit-{uuid.uuid4().hex[:12]}"
-
-
-# Mirrors agent.core.task.TrustOrigin's two constants exactly. Duplicated
-# as plain strings, not imported, for the same reason `risk` is handled as
-# a plain str above â€” this module stays free of a hard dependency on
-# agent.core.task. If agent.core.task.TrustOrigin ever gains a third value,
-# this set must be updated too (a test in tests/test_trust_origin.py or
-# tests/test_audit.py should catch drift between the two).
-_VALID_ORIGINATORS = frozenset({"MASTER_AUTHENTICATED", "LOCAL_UNAUTHENTICATED"})
-
-
-class AuditLog:
-    """Append-only JSON-lines audit log."""
-
-    def __init__(self, path: str):
-        self.path = path
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        if not os.path.exists(path):
-            # touch the file so `read_all` on a brand-new log doesn't error
-            with open(path, "a", encoding="utf-8"):
-                pass
-
-    def record(
-        self,
-        actor: str,
-        action: str,
-        task_id: str | None = None,
-        subtask_id: str | None = None,
-        tool_name: str | None = None,
-        risk: str | None = None,
-        detail: str = "",
-        originator: str | None = None,
-    ) -> AuditEntry:
-        """
-        `originator` (Phase S.5) must be either None or exactly one of
-        _VALID_ORIGINATORS above. This is deliberately re-checked here,
-        at the single point every audit entry is actually written,
-        rather than trusted from any caller: if something upstream ever
-        passes a bogus or caller-influenced string (a bug, a careless
-        future edit, anything other than a real Task.trust_origin value
-        or a safe None), it is normalized to None rather than persisted
-        verbatim. This is the last line of defense against an audit
-        record ever falsely claiming "MASTER_AUTHENTICATED" â€” silence
-        (None) is always the safe failure mode here, never an upgrade.
-        """
-        if originator is not None and originator not in _VALID_ORIGINATORS:
-            originator = None
-
-        entry = AuditEntry(
-            id=_new_id(),
-            timestamp=time.time(),
-            task_id=task_id,
-            subtask_id=subtask_id,
-            actor=actor,
-            tool_name=tool_name,
-            risk=risk,
-            action=action,
-            detail=detail,
-            originator=originator,
-        )
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(asdict(entry)) + "\n")
-        return entry
-
-    def read_all(self) -> list[AuditEntry]:
-        entries: list[AuditEntry] = []
-        with open(self.path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                data = json.loads(line)
-                entries.append(AuditEntry(**data))
-        return entries
-
-    def for_task(self, task_id: str) -> list[AuditEntry]:
-        return [e for e in self.read_all() if e.task_id == task_id]
-PS C:\Users\nukra\Lanux> git status --short
- M agent/core/audit.py
- M agent/core/bootstrap.py
- M agent/core/controller.py
- M agent/core/dispatch_map.py
- M agent/core/model_agent.py
- M agent/core/model_registry_config.py
- M agent/core/permissions.py
- M agent/core/result.py
- M agent/core/secrets_store.py
- M agent/core/task.py
- M agent/core/task_executor.py
- M agent/core/task_manager.py
- M agent/core/tool_registry.py
- M agent/planner.py
- M backend/api.py
- M tests/test_api_task_endpoints.py
- M tests/test_background_api.py
- M tests/test_bootstrap.py
- M tests/test_model_registry.py
- M tests/test_phase_d.py
- M tests/test_phase_i.py
- M tests/test_phase_j.py
- M tests/test_phase_k.py
- M tests/test_project_api.py
- M tests/test_provider_api.py
-?? agent/core/auth_session.py
-?? agent/core/master_enrollment.py
-?? agent/core/specialists/secrets_ops_agent.py
-?? tests/conftest.py
-?? tests/test_approval_identity_binding.py
-?? tests/test_auth_session.py
-?? tests/test_credential_rotation_http_s7_3.py
-?? tests/test_credential_rotation_s7_2.py
-?? tests/test_endpoint_gating_s6.py
-?? tests/test_master_enrollment.py
-?? tests/test_secrets_api_boundary.py
-?? tests/test_secrets_task_routing.py
-?? tests/test_sensitive_endpoint_gating.py
-?? tests/test_task_verification_s8.py
-?? tests/test_trust_origin.py
-?? tests/test_vault_rotation_s7_1.py
-PS C:\Users\nukra\Lanux> 
+         # is safely retried up to max_retries exactly like any other
+-            # execution failure, with zero new branching needed.
+-            result["success"] = False
+-            self._record_verification_event(
+-                ctx, VerificationState.FAILED,
+-                "written file content did not match the requested content",
+-            )
+-        return result
+-
+-    def _execute_edit_file_with_verification(self, call, ctx: ExecutionContext, approval_response) -> dict:
+-        path = call.tool_args.get("path")
+-        old_str = call.tool_args.get("old_str", "")
+-        new_str = call.tool_args.get("new_str", "")
+-
+-        # Read BEFORE the edit — required to independently compute the
+-        # exact expected post-edit content (see this module's own
+-        # docstring comment above on why edit_file()'s return shape,
+-        # a bare path string, is left unchanged rather than being
+-        # widened just to make this easier).
+-        pre_read_ok, content_before = self._read_back(path, ctx)
+-
+-        tr = ctx.tool_registry.invoke(call.tool_name, call.tool_args, ctx, approval_response)
+-        result = self._from_tool_result(tr, evaluator=call.evaluator)
+-        if not tr.success:
+-            return result  # NOT_ATTEMPTED — including if the pre-read itself failed and the
+-            # edit consequently failed too (e.g. genuinely missing file);
+-            # nothing to verify against an execution that didn't happen.
+-
+-        if not pre_read_ok:
+-            # The edit itself reported success (tr.success=True) — so
+-            # the file existed and old_str was present at the time
+-            # edit_file() ran its OWN internal read — but our
+-            # independent pre-read, taken at a slightly different
+-            # instant, could not observe it. Without content_before,
+-            # there is no expected value to compare against.
+-            result["verification_state"] = VerificationState.INCONCLUSIVE.value
+-            self._record_verification_event(
+-                ctx, VerificationState.INCONCLUSIVE,
+-                "could not read the file before edit_file to compute the expected result",
+-            )
+-            return result
+-
+-        # Exactly mirrors edit_file()'s own internal semantics —
+-        # first-occurrence-only replacement. If old_str appears more
+-        # than once in content_before, later occurrences are correctly
+-        # expected to remain untouched; this is not treated as a
+-        # mismatch.
+-        expected_content = content_before.replace(old_str, new_str, 1)
+-
+-        read_ok, observed_content = self._read_back(path, ctx)
+-        if not read_ok:
+-            result["verification_state"] = VerificationState.INCONCLUSIVE.value
+-            self._record_verification_event(
+-                ctx, VerificationState.INCONCLUSIVE,
+-                "could not read the file back after edit_file to verify its content",
+-            )
+-        elif observed_content == expected_content:
+-            result["verification_state"] = VerificationState.VERIFIED.value
+-        else:
+-            result["verification_state"] = VerificationState.FAILED.value
+-            # Phase S.8: is_retryable(EDIT_FILE) is False (non-idempotent
+-            # content mutation — see recovery.py's own docstring), so
+-            # flipping success to False here correctly routes straight
+-            # to SubtaskStatus.FAILED with NO retry, via the same
+-            # existing, unmodified logic in _run_subtask.
+-            result["success"] = False
+-            self._record_verification_event(
+-                ctx, VerificationState.FAILED,
+-                "edited file content did not match the expected result",
+-            )
+-        return result
++    # S.8 follow-up (ToolRegistry-seam integration): the WRITE_FILE/
++    # EDIT_FILE verification logic that used to live here as
++    # _execute_write_file_with_verification / _execute_edit_file_with_
++    # verification / _read_back / _record_verification_event has moved
++    # to agent/core/tool_registry.py (ToolRegistry._apply_verification /
++    # _run_verifier_phase, plus the module-level _verify_write_file /
++    # _verify_edit_file / _verification_read_back functions), so it runs
++    # identically for this fallback dispatch AND every specialist's
++    # run_plan_via_registry() call — see _execute_plan() above, which
++    # now dispatches WRITE_FILE/EDIT_FILE through the same generic
++    # ctx.tool_registry.invoke() path as every other TaskType. Nothing
++    # about the resulting VerificationState/audit/retry behavior changed
++    # — only where the check physically runs.
+ 
+     def _summarize(self, task: Task) -> str:
+         lines = []
+diff --git a/agent/core/tool_registry.py b/agent/core/tool_registry.py
+index 44da58c..3ce6c8e 100644
+--- a/agent/core/tool_registry.py
++++ b/agent/core/tool_registry.py
+@@ -28,7 +28,7 @@ from typing import Any, Callable
+ 
+ from agent.core.audit import AuditLog
+ from agent.core.permissions import ApprovalDecision, ApprovalResponse, PermissionGateway, RiskLevel
+-from agent.core.result import ExecutionContext, ToolResult
++from agent.core.result import ExecutionContext, ToolResult, VerificationState
+ from agent.core.secrets_store import SecretsVault
+ from tools import filesystem as fs_tools
+ from tools import github as github_tools
+@@ -64,6 +64,44 @@ class ToolSpec:
+     # secrets.set ("value") and secrets.unlock/secrets.initialize
+     # ("passphrase").
+     sensitive_args: frozenset[str] = field(default_factory=frozenset)
++    # S.8 follow-up (WATCHER/ToolRegistry-seam integration): declarative,
++    # optional, per-tool verification hook — same pattern as
++    # sensitive_args above. None (the default) means zero behavior
++    # change: ToolRegistry.invoke() never calls anything and every
++    # ToolResult it returns keeps verification_state == NOT_ATTEMPTED,
++    # exactly as before this integration. Scoped in THIS phase to
++    # filesystem.write_file and filesystem.edit_file only — see their
++    # registrations in build_default_registry() below. A future tool
++    # becomes verification-capable purely by declaring this field; no
++    # specialist, Router, or LANUXS5Controller code ever needs to change.
++    #
++    # Calling convention (owned entirely by ToolRegistry.invoke(), never
++    # by a tool handler): a two-phase callable,
++    #     verifier(phase, args, state, tr, ctx) -> Any
++    # invoke() calls it up to twice per successful handler call:
++    #   phase="pre"  — immediately BEFORE the handler runs (state=None,
++    #                  tr=None). Exists only because a mutating tool
++    #                  (edit_file) needs a snapshot of prior state that
++    #                  is unrecoverable once the handler has run; a
++    #                  verifier that needs no prior state (write_file)
++    #                  simply returns None here. Whatever is returned is
++    #                  held by invoke() and handed back unchanged as
++    #                  `state` on the "post" call — invoke() never
++    #                  inspects or interprets it.
++    #   phase="post" — called only after the handler has already
++    #                  reported success (never on execution failure —
++    #                  see invoke()'s own guard), with the real
++    #                  ToolResult as `tr`. Must return exactly
++    #                  (VerificationState, short_generic_detail_str).
++    #                  The detail string must never contain file
++    #                  content, diffs, raw bytes, or secrets — it goes
++    #                  straight into an audit log entry for FAILED/
++    #                  INCONCLUSIVE (see invoke()'s own verification
++    #                  handling below).
++    # A verifier must never mutate `tr`, `args`, or anything on `ctx` —
++    # ToolRegistry.invoke() applies the FAILED-state's success=False
++    # flip itself, based solely on the returned VerificationState.
++    verifier: Callable[..., Any] | None = None
+ 
+ 
+ class ToolRegistry:
+@@ -146,6 +184,22 @@ class ToolRegistry:
+         # still fully in force and unconditional; a SandboxViolation here
+         # means the action was permission-approved but structurally
+         # disallowed anyway, which is expected defense in depth, not a bug.
++        #
++        # S.8 follow-up: the "pre" verifier phase runs here, BEFORE the
++        # handler, only if this ToolSpec declares one — this is a direct,
++        # faithful relocation of the exact same pre-read S.8's original
++        # EDIT_FILE verification already did before invoking the tool
++        # (see git history / the S.8 handoff); it is not new behavior,
++        # only a new location. A verifier whose "pre" phase has nothing
++        # to capture (write_file's) simply returns None, at zero cost.
++        # If the handler goes on to fail or raise, this pre-state is
++        # silently discarded below — matching the existing, unmodified
++        # rule that verification never produces a verdict for an
++        # execution failure.
++        pre_verification_state = None
++        if spec.verifier is not None:
++            pre_verification_state = self._run_verifier_phase(spec, "pre", args, None, None, ctx)
++
+         start = time.time()
+         try:
+             output = spec.handler(**args)
+@@ -155,7 +209,10 @@ class ToolRegistry:
+                 subtask_id=ctx.subtask_id, tool_name=name, risk=spec.risk.value,
+                 detail=f"duration_sec={duration:.3f}", originator=ctx.trust_origin,
+             )
+-            return ToolResult(tool_name=name, success=True, output=output, raw=output, duration_sec=duration)
++            result = ToolResult(tool_name=name, success=True, output=output, raw=output, duration_sec=duration
+)
++            if spec.verifier is not None:
++                self._apply_verification(spec, args, pre_verification_state, result, ctx)
++            return result
+         except SandboxViolation as e:
+             duration = time.time() - start
+             self.audit_log.record(
+@@ -173,6 +230,124 @@ class ToolRegistry:
+             )
+             return ToolResult(tool_name=name, success=False, error=str(e), duration_sec=duration, raw={"except
+ion": str(e)})
+ 
++    # ------------------------------------------------------------------
++    # S.8 follow-up — verification (ToolRegistry-seam integration)
++    # ------------------------------------------------------------------
++
++    def _run_verifier_phase(self, spec: ToolSpec, phase: str, args: dict, state, tr: ToolResult | None, ctx: E
+xecutionContext):
++        """
++        Calls spec.verifier for exactly one phase ("pre" or "post"),
++        never letting an unexpected exception inside a verifier escape
++        into the caller — mirrors this same module's own
++        "never let a tool handler crash the caller" philosophy in
++        invoke()'s except blocks. A "pre"-phase exception yields no
++        pre-state (None); a "post"-phase exception yields INCONCLUSIVE,
++        never a false VERIFIED/FAILED verdict.
++        """
++        try:
++            return spec.verifier(phase, args, state, tr, ctx)
++        except Exception:  # noqa: BLE001 — a broken verifier must never crash invoke()
++            if phase == "post":
++                return VerificationState.INCONCLUSIVE, "verifier raised an unexpected exception"
++            return None
++
++    def _apply_verification(self, spec: ToolSpec, args: dict, pre_state, result: ToolResult, ctx: ExecutionCon
+text) -> None:
++        """
++        Runs the "post" verifier phase and applies its verdict to
++        `result` in place. Only ever called from invoke(), only after a
++        successful handler call. Owns the ONLY two rules this
++        integration adds: FAILED flips result.success to False (so the
++        existing, unmodified retry/recovery logic in
++        agent/core/task_manager.py / agent/core/recovery.py sees this as
++        a failed operation, exactly as S.8's original implementation
++        already did), and FAILED/INCONCLUSIVE each get exactly one
++        generic, non-sensitive audit entry (VERIFIED and NOT_ATTEMPTED
++        get none — unchanged from S.8's original audit schema).
++        """
++        state, detail = self._run_verifier_phase(spec, "post", args, pre_state, result, ctx)
++        result.verification_state = state
++        if state is VerificationState.FAILED:
++            result.success = False
++        if state in (VerificationState.FAILED, VerificationState.INCONCLUSIVE):
++            action = "verification_failed" if state is VerificationState.FAILED else "verification_inconclusiv
+e"
++            self.audit_log.record(
++                actor=ctx.actor, action=action, task_id=ctx.task_id,
++                subtask_id=ctx.subtask_id, detail=detail, originator=ctx.trust_origin,
++            )
++
++
++# ----------------------------------------------------------------------
++# S.8 follow-up — the two verifiers in this phase's exact scope, plus
++# their shared read-back helper. Module-level (not ToolRegistry methods)
++# since they need no registry state beyond what's passed to them, and
++# this keeps them trivially unit-testable in isolation.
++# ----------------------------------------------------------------------
++
++def _verification_read_back(path: str, ctx: ExecutionContext) -> tuple[bool, str | None]:
++    """
++    The one and only way write/edit verification ever observes
++    filesystem state: through ctx.tool_registry.invoke("filesystem.
++    read_file", ...) — the exact same authorized path any ordinary
++    READ_FILE call already uses. Never a raw open() call, so
++    verification stays inside Sandbox/PermissionGateway rather than
++    bypassing them. filesystem.read_file's own ToolSpec declares no
++    verifier (see build_default_registry() below), so this recursive
++    invoke() call terminates after exactly one extra frame — it
++    structurally cannot trigger another round of verification.
++
++    A denied or failed read-back returns (False, None) without
++    distinguishing why: for verification purposes both mean the same
++    thing — the observation could not be completed, i.e. INCONCLUSIVE,
++    never silently treated as a content mismatch or as success.
++    """
++    read_tr = ctx.tool_registry.invoke("filesystem.read_file", {"path": path}, ctx, None)
++    if not read_tr.success:
++        return False, None
++    return True, read_tr.output
++
++
++def _verify_write_file(phase: str, args: dict, state, tr: ToolResult | None, ctx: ExecutionContext):
++    """WRITE_FILE verifier — attached to filesystem.write_file's ToolSpec."""
++    if phase == "pre":
++        return None  # nothing needed before write_file runs
++    expected_content = args.get("content", "")
++    path = args.get("path")
++    read_ok, observed_content = _verification_read_back(path, ctx)
++    if not read_ok:
++        return VerificationState.INCONCLUSIVE, "could not read the file back after write_file to verify its co
+ntent"
++    if observed_content == expected_content:
++        return VerificationState.VERIFIED, ""
++    return VerificationState.FAILED, "written file content did not match the requested content"
++
++
++def _verify_edit_file(phase: str, args: dict, state, tr: ToolResult | None, ctx: ExecutionContext):
++    """
++    EDIT_FILE verifier — attached to filesystem.edit_file's ToolSpec.
++    The "pre" phase captures the file's content BEFORE the mutating
++    handler runs (unrecoverable afterward) so the "post" phase can
++    compute the exact expected postcondition. Mirrors edit_file()'s own
++    first-occurrence-only replacement semantics exactly, so a later,
++    untouched occurrence of old_str is never treated as a mismatch.
++    """
++    path = args.get("path")
++    if phase == "pre":
++        return _verification_read_back(path, ctx)
++
++    pre_read_ok, content_before = state
++    if not pre_read_ok:
++        return VerificationState.INCONCLUSIVE, "could not read the file before edit_file to compute the expect
+ed result"
++
++    old_str = args.get("old_str", "")
++    new_str = args.get("new_str", "")
++    expected_content = content_before.replace(old_str, new_str, 1)
++
++    read_ok, observed_content = _verification_read_back(path, ctx)
++    if not read_ok:
++        return VerificationState.INCONCLUSIVE, "could not read the file back after edit_file to verify its con
+tent"
++    if observed_content == expected_content:
++        return VerificationState.VERIFIED, ""
++    return VerificationState.FAILED, "edited file content did not match the expected result"
++
+ 
+ def build_default_registry(
+     sandbox: Sandbox, permission_gateway: PermissionGateway, audit_log: AuditLog, knowledge=None,
+@@ -201,6 +376,9 @@ def build_default_registry(
+         name="filesystem.read_file", category="filesystem", risk=RiskLevel.SAFE,
+         handler=lambda path: fs_tools.read_file(sandbox, path),
+         required_args=("path",), description="Read a file's contents.",
++        # S.8 follow-up: deliberately NO verifier here — this is exactly
++        # what _verification_read_back() itself calls, so attaching one
++        # would make every write_file/edit_file verification recurse.
+     ))
+     registry.register(ToolSpec(
+         name="filesystem.list_directory", category="filesystem", risk=RiskLevel.SAFE,
+@@ -211,11 +389,13 @@ def build_default_registry(
+         name="filesystem.write_file", category="filesystem", risk=RiskLevel.LOW,
+         handler=lambda path, content, overwrite=True: fs_tools.write_file(sandbox, path, content, overwrite=ov
+erwrite),
+         required_args=("path", "content"), description="Write (create/overwrite) a file.",
++        verifier=_verify_write_file,
+     ))
+     registry.register(ToolSpec(
+         name="filesystem.edit_file", category="filesystem", risk=RiskLevel.LOW,
+         handler=lambda path, old_str, new_str: fs_tools.edit_file(sandbox, path, old_str, new_str),
+         required_args=("path", "old_str", "new_str"), description="Replace text in a file.",
++        verifier=_verify_edit_file,
+     ))
+     registry.register(ToolSpec(
+         name="filesystem.delete_file", category="filesystem", risk=RiskLevel.MODERATE,
+diff --git a/tests/test_security_boundaries.py b/tests/test_security_boundaries.py
+index 5161085..bbe22a4 100644
+--- a/tests/test_security_boundaries.py
++++ b/tests/test_security_boundaries.py
+@@ -62,7 +62,16 @@ def test_invoke_always_calls_permission_gateway_check(env, monkeypatch):
+     monkeypatch.setattr(env["gateway"], "check", spy_check)
+     env["registry"].invoke("filesystem.list_directory", {"path": "."}, env["ctx"])
+     env["registry"].invoke("filesystem.write_file", {"path": "a.txt", "content": "x"}, env["ctx"])
+-    assert len(calls) == 2, "every invoke() call must pass through PermissionGateway.check()"
++    # 3, not 2: list_directory contributes 1 check; write_file contributes 2 —
++    # one for the write_file invoke() itself, and one more because its S.8
++    # follow-up WATCHER verifier reads the file back via a *second*,
++    # fully authorized registry.invoke("filesystem.read_file", ...) call
++    # (see tool_registry.py::_verification_read_back). That internal call
++    # is not a shortcut around the gateway — it is required to pass through
++    # it like any other invoke() call, which is exactly what this assertion
++    # is meant to catch. A verifier-less tool (or a failed/denied outer
++    # call, which never reaches the verifier) still contributes exactly 1.
++    assert len(calls) == 3, "every invoke() call, including internal verification read-backs, must pass throug
+h PermissionGateway.check()"
+ 
+ 
+ def test_moderate_tool_cannot_execute_without_a_prior_check_call(env):
+diff --git a/tests/test_task_verification_s8.py b/tests/test_task_verification_s8.py
+index 7bdad34..da92c2a 100644
+--- a/tests/test_task_verification_s8.py
++++ b/tests/test_task_verification_s8.py
+@@ -4,23 +4,37 @@ tests/test_task_verification_s8.py — Phase S.8 dedicated behavioral tests.
+ S.8 is the first deterministic WATCHER layer: independently confirming that
+ what a tool call CLAIMED to do actually happened, on top of the existing
+ Task -> Subtask -> ToolRegistry -> PermissionGateway -> Sandbox execution
+-pipeline. This file is the first dedicated test coverage for that layer —
+-see LANUX-S8-CLAUDE-HANDOFF.md section 12 for the exact checklist this was
+-written against. Nothing here redesigns the approved S.8 contract; every
+-test exercises implementation already present in agent/core/task.py and
+-agent/core/task_manager.py.
++pipeline.
++
++S.8 FOLLOW-UP (ToolRegistry-seam integration): the verification logic that
++originally lived only in TaskManager's fallback dispatch
++(_execute_write_file_with_verification / _execute_edit_file_with_verification
++/ _read_back / _record_verification_event) has moved to the shared
++ToolRegistry.invoke() seam (agent/core/tool_registry.py: ToolSpec.verifier,
++ToolRegistry._apply_verification/_run_verifier_phase, plus the module-level
++_verify_write_file/_verify_edit_file/_verification_read_back functions), so
++it now runs identically whether a subtask is executed by TaskManager's plain
++fallback dispatch OR routed to a specialist (e.g. CoderAgent) by
++LANUXS5Controller/Router. Sections 1-8 below cover the exact same behavioral
++contract as before -- only the fault-injection mechanism changed (monkey-
++patching registry.invoke instead of a now-relocated private TaskManager
++method), never the assertions. Section 9 is new: it proves the SAME
++contract holds end-to-end through the real production path (Lanux s5 ->
++Router -> CoderAgent -> ToolRegistry), which is the gap this follow-up
++closes.
+ 
+ Sections:
+   1. VerificationState — data model (values, default, safe-fallback helper)
+   2. Serialization / backward compatibility (to_dict/from_dict round trip)
+   3. Existing evaluator (GIT_*/RUN_TESTS) -> VerificationState mapping
+-  4. WRITE_FILE verification (VERIFIED / FAILED+retry / INCONCLUSIVE)
+-  5. EDIT_FILE verification (VERIFIED / first-occurrence semantics /
+-     FAILED+no-retry / INCONCLUSIVE, pre- and post-read)
++  4. WRITE_FILE verification, fallback dispatch path
++  5. EDIT_FILE verification, fallback dispatch path
+   6. Execution failure -> NOT_ATTEMPTED (both TaskTypes)
+   7. Audit integration (correct actions, generic detail, no leakage)
+   8. Security boundaries (authorized pathway only, no gateway bypass,
+      TrustOrigin untouched)
++  9. Specialist-routed path (Lanux s5 -> Router -> CoderAgent) — the new
++     coverage this follow-up integration adds
+ """
+ 
+ import os
+@@ -38,6 +52,9 @@ from agent.core.permissions import PermissionGateway, PermissionDecision, Approv
+ from agent.core.result import ToolResult
+ from agent.core.tool_registry import build_default_registry
+ from agent.core.task_manager import TaskManager
++from agent.core.model_registry_config import build_default_model_registry
++from agent.core.controller import LANUXS5Controller
++from agent.core.model_agent import AgentResult, AgentRole
+ from agent.core.task import (
+     Subtask, SubtaskStatus, Task, TaskStatus, TrustOrigin, VerificationState,
+     _safe_verification_state, new_subtask, new_task,
+@@ -59,6 +76,39 @@ def env():
+         yield {"dir": d, "sandbox": sandbox, "audit": audit, "gateway": gateway, "registry": registry, "tm": t
+m}
+ 
+ 
++@pytest.fixture
++def s5_env():
++    """
++    The REAL production wiring: TaskManager + ModelRegistry (with the
++    default specialists, including CoderAgent) + LANUXS5Controller, whose
++    __init__ sets task_manager.executor -- exactly what
++    agent/core/bootstrap.py::build_agent_core() does. Section 9 drives
++    everything through controller.handle(), never a bare TaskManager, so
++    it exercises the Router -> CoderAgent -> ToolRegistry path this
++    follow-up integration was written to cover.
++    """
++    with tempfile.TemporaryDirectory() as d:
++        os.makedirs(os.path.join(d, "tests"), exist_ok=True)
++        with open(os.path.join(d, "tests", "test_dummy.py"), "w") as f:
++            f.write("def test_ok():\n    assert 1 == 1\n")
++        sandbox = Sandbox(SandboxPolicy(workspace_root=d))
++        audit = AuditLog(os.path.join(d, "audit.jsonl"))
++        gateway = PermissionGateway(audit)
++        registry = build_default_registry(sandbox, gateway, audit)
++        tm = TaskManager(registry, audit_log=audit)
++        mr = build_default_model_registry()
++        controller = LANUXS5Controller(tm, mr)
++        yield {
++            "dir": d, "sandbox": sandbox, "audit": audit, "gateway": gateway,
++            "registry": registry, "tm": tm, "mr": mr, "controller": controller,
++        }
++
++
++def _seed_file(env_, path, content):
++    with open(os.path.join(env_["dir"], path), "w") as f:
++        f.write(content)
++
++
+ # ============================================================
+ # 1. VerificationState — data model
+ # ============================================================
+@@ -108,8 +158,6 @@ def test_from_dict_restores_verification_state():
+ 
+ 
+ def test_from_dict_falls_back_to_not_attempted_on_missing_key():
+-    # Simulates a Subtask persisted before S.8 existed — the key is
+-    # genuinely absent, not just empty/null.
+     task = new_task("hello")
+     task.subtasks.append(new_subtask(Plan(task_type=TaskType.LIST_DIRECTORY, args={})))
+     task.subtasks[0].verification_state = VerificationState.VERIFIED
+@@ -133,10 +181,6 @@ def test_from_dict_falls_back_to_not_attempted_on_corrupt_value():
+ # ============================================================
+ 
+ def test_existing_git_evaluator_success_maps_to_verified(env):
+-    # git.status is SAFE-risk (auto-approved) and dict-evaluator-backed
+-    # (evaluate_command_result). A real git repo -> returncode 0 -> the
+-    # pre-existing success behavior is unchanged AND the new
+-    # verification_state field is now VERIFIED.
+     subprocess.run(["git", "init"], cwd=env["dir"], check=True, capture_output=True)
+     task = env["tm"].create_task("git status", explicit_task_type=TaskType.GIT_STATUS)
+     task = env["tm"].run_task(task)
+@@ -145,9 +189,6 @@ def test_existing_git_evaluator_success_maps_to_verified(env):
+ 
+ 
+ def test_existing_git_evaluator_failure_maps_to_failed(env):
+-    # No git repo in the sandbox workspace -> `git status --porcelain`
+-    # returns a nonzero returncode -> evaluate_command_result reports
+-    # failure, exactly as before S.8 -> verification_state is now FAILED.
+     task = env["tm"].create_task("git status", explicit_task_type=TaskType.GIT_STATUS)
+     task = env["tm"].run_task(task)
+     assert task.status == TaskStatus.FAILED
+@@ -155,7 +196,7 @@ def test_existing_git_evaluator_failure_maps_to_failed(env):
+ 
+ 
+ # ============================================================
+-# 4. WRITE_FILE verification
++# 4. WRITE_FILE verification — fallback dispatch path
+ # ============================================================
+ 
+ def test_write_file_exact_content_match_is_verified(env):
+@@ -173,11 +214,19 @@ def test_write_file_exact_content_match_is_verified(env):
+ 
+ def test_write_file_content_mismatch_is_failed_and_retries(env, monkeypatch):
+     tm = env["tm"]
+-    # Force every post-write readback to observe different content than
+-    # what was actually requested, regardless of what's really on disk —
+-    # isolates the comparison-mismatch path without needing to corrupt
+-    # the tool's own write behavior.
+-    monkeypatch.setattr(tm, "_read_back", lambda path, ctx: (True, "not-what-was-written"))
++    registry = env["registry"]
++    real_invoke = registry.invoke
++
++    # Fault-injection now targets the registry's own invoke() — the
++    # shared seam every caller (fallback dispatch AND every specialist)
++    # goes through — rather than a TaskManager-private method, since
++    # that's where verification now actually runs.
++    def flaky_invoke(name, args, ctx, approval_response=None):
++        if name == "filesystem.read_file":
++            return ToolResult(tool_name=name, success=True, output="not-what-was-written")
++        return real_invoke(name, args, ctx, approval_response)
++
++    monkeypatch.setattr(registry, "invoke", flaky_invoke)
+ 
+     task = tm.create_task(
+         "save note", explicit_task_type=TaskType.WRITE_FILE,
+@@ -194,7 +243,15 @@ def test_write_file_content_mismatch_is_failed_and_retries(env, monkeypatch):
+ 
+ def test_write_file_readback_failure_is_inconclusive_and_does_not_retry(env, monkeypatch):
+     tm = env["tm"]
+-    monkeypatch.setattr(tm, "_read_back", lambda path, ctx: (False, None))
++    registry = env["registry"]
++    real_invoke = registry.invoke
++
++    def flaky_invoke(name, args, ctx, approval_response=None):
++        if name == "filesystem.read_file":
++            return ToolResult(tool_name=name, success=False, error="simulated read failure")
++        return real_invoke(name, args, ctx, approval_response)
++
++    monkeypatch.setattr(registry, "invoke", flaky_invoke)
+ 
+     task = tm.create_task(
+         "save note", explicit_task_type=TaskType.WRITE_FILE,
+@@ -205,19 +262,13 @@ def test_write_file_readback_failure_is_inconclusive_and_does_not_retry(env, mon
+     assert task.status == TaskStatus.COMPLETED
+     assert task.subtasks[0].status == SubtaskStatus.DONE
+     assert task.subtasks[0].verification_state == VerificationState.INCONCLUSIVE
+-    # INCONCLUSIVE must never trigger a retry, unlike FAILED above.
+     assert task.subtasks[0].attempts == 1
+ 
+ 
+ # ============================================================
+-# 5. EDIT_FILE verification
++# 5. EDIT_FILE verification — fallback dispatch path
+ # ============================================================
+ 
+-def _seed_file(env, path, content):
+-    with open(os.path.join(env["dir"], path), "w") as f:
+-        f.write(content)
+-
+-
+ def test_edit_file_exact_content_match_is_verified(env):
+     _seed_file(env, "note.txt", "hello world")
+     tm = env["tm"]
+@@ -233,11 +284,6 @@ def test_edit_file_exact_content_match_is_verified(env):
+ 
+ 
+ def test_edit_file_repeated_old_str_only_replaces_first_occurrence_and_verifies(env):
+-    # The exact case the approved contract calls out: old_str appears
+-    # more than once. edit_file() itself only replaces the first
+-    # occurrence, and the verification logic must reproduce that same
+-    # semantics when computing its expectation — a later, untouched
+-    # occurrence must NOT be treated as a mismatch.
+     _seed_file(env, "note.txt", "hello hello world")
+     tm = env["tm"]
+     task = tm.create_task(
+@@ -248,27 +294,28 @@ def test_edit_file_repeated_old_str_only_replaces_first_occurrence_and_verifies(
+     assert task.status == TaskStatus.COMPLETED
+     assert task.subtasks[0].verification_state == VerificationState.VERIFIED
+     with open(os.path.join(env["dir"], "note.txt")) as f:
+-        # Only the first "hello" is replaced; the second is untouched.
+         assert f.read() == "hi hello world"
+ 
+ 
+ def test_edit_file_content_mismatch_is_failed_and_does_not_retry(env, monkeypatch):
+     _seed_file(env, "note.txt", "hello world")
+     tm = env["tm"]
+-    real_read_back = tm._read_back
++    registry = env["registry"]
++    real_invoke = registry.invoke
+     call_n = {"n": 0}
+ 
+-    def mismatched_read_back(path, ctx):
+-        call_n["n"] += 1
+-        if call_n["n"] == 2:
+-            # Let the pre-edit read (#1) be real, so a genuine
+-            # expected_content gets computed; corrupt only the
+-            # post-edit read (#2) so the comparison mismatches even
+-            # though the edit itself actually succeeded on disk.
+-            return True, "not-what-was-expected"
+-        return real_read_back(path, ctx)
++    def flaky_invoke(name, args, ctx, approval_response=None):
++        if name == "filesystem.read_file":
++            call_n["n"] += 1
++            if call_n["n"] == 2:
++                # Let the pre-edit read (#1) be real, so a genuine
++                # expected_content gets computed; corrupt only the
++                # post-edit read (#2) so the comparison mismatches even
++                # though the edit itself actually succeeded on disk.
++                return ToolResult(tool_name=name, success=True, output="not-what-was-expected")
++        return real_invoke(name, args, ctx, approval_response)
+ 
+-    monkeypatch.setattr(tm, "_read_back", mismatched_read_back)
++    monkeypatch.setattr(registry, "invoke", flaky_invoke)
+ 
+     task = tm.create_task(
+         "edit note", explicit_task_type=TaskType.EDIT_FILE,
+@@ -286,8 +333,18 @@ def test_edit_file_content_mismatch_is_failed_and_does_not_retry(env, monkeypatc
+ def test_edit_file_pre_read_failure_is_inconclusive(env, monkeypatch):
+     _seed_file(env, "note.txt", "hello world")
+     tm = env["tm"]
++    registry = env["registry"]
++    real_invoke = registry.invoke
++    call_n = {"n": 0}
+ 
+-    monkeypatch.setattr(tm, "_read_back", lambda path, ctx: (False, None))
++    def flaky_invoke(name, args, ctx, approval_response=None):
++        if name == "filesystem.read_file":
++            call_n["n"] += 1
++            if call_n["n"] == 1:
++                return ToolResult(tool_name=name, success=False, error="simulated pre-read failure")
++        return real_invoke(name, args, ctx, approval_response)
++
++    monkeypatch.setattr(registry, "invoke", flaky_invoke)
+ 
+     task = tm.create_task(
+         "edit note", explicit_task_type=TaskType.EDIT_FILE,
+@@ -295,9 +352,9 @@ def test_edit_file_pre_read_failure_is_inconclusive(env, monkeypatch):
+     )
+     task = tm.run_task(task)
+ 
+-    # edit_file() does its own internal read (not routed through
+-    # verification's _read_back), so the actual edit tool call itself
+-    # still succeeds even though our independent pre-read failed.
++    # edit_file() does its own internal read (not routed through the
++    # verifier's read-back), so the actual edit tool call itself still
++    # succeeds even though the independent pre-read failed.
+     assert task.status == TaskStatus.COMPLETED
+     assert task.subtasks[0].status == SubtaskStatus.DONE
+     assert task.subtasks[0].verification_state == VerificationState.INCONCLUSIVE
+@@ -307,16 +364,18 @@ def test_edit_file_pre_read_failure_is_inconclusive(env, monkeypatch):
+ def test_edit_file_post_read_failure_is_inconclusive(env, monkeypatch):
+     _seed_file(env, "note.txt", "hello world")
+     tm = env["tm"]
+-    real_read_back = tm._read_back
++    registry = env["registry"]
++    real_invoke = registry.invoke
+     call_n = {"n": 0}
+ 
+-    def flaky_read_back(path, ctx):
+-        call_n["n"] += 1
+-        if call_n["n"] == 1:
+-            return real_read_back(path, ctx)  # pre-read succeeds
+-        return False, None  # post-read fails
++    def flaky_invoke(name, args, ctx, approval_response=None):
++        if name == "filesystem.read_file":
++            call_n["n"] += 1
++            if call_n["n"] == 2:
++                return ToolResult(tool_name=name, success=False, error="simulated post-read failure")
++        return real_invoke(name, args, ctx, approval_response)
+ 
+-    monkeypatch.setattr(tm, "_read_back", flaky_read_back)
++    monkeypatch.setattr(registry, "invoke", flaky_invoke)
+ 
+     task = tm.create_task(
+         "edit note", explicit_task_type=TaskType.EDIT_FILE,
+@@ -335,9 +394,6 @@ def test_edit_file_post_read_failure_is_inconclusive(env, monkeypatch):
+ # ============================================================
+ 
+ def test_write_file_execution_failure_is_not_attempted(env):
+-    # overwrite=False against a pre-existing file -> write_file() raises
+-    # FileExistsError -> a real execution failure, never reaching the
+-    # readback step at all.
+     _seed_file(env, "note.txt", "already here")
+     tm = env["tm"]
+     task = tm.create_task(
+@@ -350,8 +406,6 @@ def test_write_file_execution_failure_is_not_attempted(env):
+ 
+ 
+ def test_edit_file_execution_failure_is_not_attempted(env):
+-    # Missing file -> edit_file() raises -> execution failure, not a
+-    # verification outcome.
+     tm = env["tm"]
+     task = tm.create_task(
+         "edit note", explicit_task_type=TaskType.EDIT_FILE,
+@@ -363,9 +417,6 @@ def test_edit_file_execution_failure_is_not_attempted(env):
+ 
+ 
+ def test_edit_file_old_str_not_found_is_not_attempted(env):
+-    # File exists, but old_str genuinely isn't in it -> edit_file()
+-    # raises ValueError -> execution failure -> NOT_ATTEMPTED, never a
+-    # verification mismatch.
+     _seed_file(env, "note.txt", "hello world")
+     tm = env["tm"]
+     task = tm.create_task(
+@@ -398,7 +449,15 @@ def test_verified_and_not_attempted_produce_no_verification_audit_event(env):
+ 
+ def test_failed_produces_verification_failed_audit_event_with_generic_detail(env, monkeypatch):
+     tm = env["tm"]
+-    monkeypatch.setattr(tm, "_read_back", lambda path, ctx: (True, "not-what-was-written"))
++    registry = env["registry"]
++    real_invoke = registry.invoke
++
++    def flaky_invoke(name, args, ctx, approval_response=None):
++        if name == "filesystem.read_file":
++            return ToolResult(tool_name=name, success=True, output="not-what-was-written")
++        return real_invoke(name, args, ctx, approval_response)
++
++    monkeypatch.setattr(registry, "invoke", flaky_invoke)
+ 
+     task = tm.create_task(
+         "save note", explicit_task_type=TaskType.WRITE_FILE,
+@@ -417,7 +476,15 @@ def test_failed_produces_verification_failed_audit_event_with_generic_detail(env
+ 
+ def test_inconclusive_produces_verification_inconclusive_audit_event_with_generic_detail(env, monkeypatch):
+     tm = env["tm"]
+-    monkeypatch.setattr(tm, "_read_back", lambda path, ctx: (False, None))
++    registry = env["registry"]
++    real_invoke = registry.invoke
++
++    def flaky_invoke(name, args, ctx, approval_response=None):
++        if name == "filesystem.read_file":
++            return ToolResult(tool_name=name, success=False, error="simulated read failure")
++        return real_invoke(name, args, ctx, approval_response)
++
++    monkeypatch.setattr(registry, "invoke", flaky_invoke)
+ 
+     task = tm.create_task(
+         "save note", explicit_task_type=TaskType.WRITE_FILE,
+@@ -433,11 +500,17 @@ def test_inconclusive_produces_verification_inconclusive_audit_event_with_generi
+ 
+ 
+ def test_no_verification_audit_event_leaks_file_content_across_scenarios(env, monkeypatch):
+-    # Broader sweep: run every FAILED/INCONCLUSIVE scenario for both
+-    # TaskTypes and confirm no verification-related audit entry, across
+-    # the whole run, ever contains the literal file content involved.
+     secret_marker = "SUPER-SENSITIVE-PAYLOAD-XYZ"
+-    monkeypatch.setattr(tm := env["tm"], "_read_back", lambda path, ctx: (True, secret_marker))
++    tm = env["tm"]
++    registry = env["registry"]
++    real_invoke = registry.invoke
++
++    def flaky_invoke(name, args, ctx, approval_response=None):
++        if name == "filesystem.read_file":
++            return ToolResult(tool_name=name, success=True, output=secret_marker)
++        return real_invoke(name, args, ctx, approval_response)
++
++    monkeypatch.setattr(registry, "invoke", flaky_invoke)
+ 
+     task = tm.create_task(
+         "save note", explicit_task_type=TaskType.WRITE_FILE,
+@@ -477,8 +550,6 @@ def test_readback_goes_through_authorized_tool_registry_pathway(env):
+         registry.invoke = real_invoke
+ 
+     assert task.subtasks[0].verification_state == VerificationState.VERIFIED
+-    # The readback must be a real, ordinary ToolRegistry.invoke() call —
+-    # never a raw filesystem read that bypasses the registry entirely.
+     assert calls.count("filesystem.write_file") == 1
+     assert calls.count("filesystem.read_file") == 1
+ 
+@@ -501,20 +572,22 @@ def test_verification_readback_denied_by_gateway_becomes_inconclusive_not_bypass
+     )
+     task = tm.run_task(task)
+ 
+-    # If verification could bypass the gateway, this denial would have
+-    # no effect and the outcome would still be VERIFIED. Instead the
+-    # denial correctly surfaces as an ordinary read failure ->
+-    # INCONCLUSIVE — proving the gateway is genuinely still in the loop.
+     assert task.subtasks[0].verification_state == VerificationState.INCONCLUSIVE
+-    # The write itself was never denied, so the subtask still completes.
+     assert task.subtasks[0].status == SubtaskStatus.DONE
+ 
+-    # The actual file content on disk still reflects the real write —
+-    # verification's own denied read didn't corrupt or alter anything.
+     with open(os.path.join(env["dir"], "note.txt")) as f:
+         assert f.read() == "hello world"
+ 
+ 
++def test_read_file_itself_declares_no_verifier_and_does_not_recurse(env):
++    # Structural guarantee, not just a behavioral one: filesystem.
++    # read_file's own ToolSpec must never carry a verifier, or every
++    # write/edit verification's read-back would trigger another round
++    # of verification.
++    spec = env["registry"].get_spec("filesystem.read_file")
++    assert spec.verifier is None
++
++
+ def test_verification_does_not_modify_trust_origin(env):
+     tm = env["tm"]
+     task = tm.create_authenticated_task(
+@@ -540,3 +613,237 @@ def test_trust_origin_has_no_setter_even_after_verification_runs(env):
+     task = tm.run_task(task)
+     with pytest.raises(AttributeError):
+         task.trust_origin = TrustOrigin.MASTER_AUTHENTICATED
++
++
++# ============================================================
++# 9. Specialist-routed path — Lanux s5 -> Router -> CoderAgent
++#
++# Everything above proves the contract on TaskManager's bare fallback
++# dispatch. Real production traffic never takes that path: build_agent_
++# core() always wires LANUXS5Controller, and CoderAgent always claims
++# WRITE_FILE/EDIT_FILE — so this section drives every scenario through
++# controller.handle(), the actual public entry point, to prove the same
++# ToolRegistry-seam verification applies there too.
++# ============================================================
++
++def test_specialist_routed_write_file_is_verified(s5_env):
++    controller = s5_env["controller"]
++    task = controller.handle(
++        "save note", explicit_task_type=TaskType.WRITE_FILE,
++        explicit_args={"path": "note.txt", "content": "hello world"},
++    )
++    assert task.status == TaskStatus.COMPLETED
++    assert task.subtasks[0].verification_state == VerificationState.VERIFIED
++    # Confirm this genuinely went through the specialist, not the
++    # fallback -- _run_subtask's result dict (persisted on the subtask)
++    # carries the role CoderAgent reports itself as.
++    assert task.subtasks[0].result.get("role") == AgentRole.CODER.value
++
++
++def test_specialist_routed_edit_file_is_verified(s5_env):
++    controller = s5_env["controller"]
++    _seed_file(s5_env, "note.txt", "hello world")
++    task = controller.handle(
++        "edit note", explicit_task_type=TaskType.EDIT_FILE,
++        explicit_args={"path": "note.txt", "old_str": "world", "new_str": "there"},
++    )
++    assert task.status == TaskStatus.COMPLETED
++    assert task.subtasks[0].verification_state == VerificationState.VERIFIED
++    assert task.subtasks[0].result.get("role") == AgentRole.CODER.value
++    with open(os.path.join(s5_env["dir"], "note.txt")) as f:
++        assert f.read() == "hello there"
++
++
++def test_specialist_routed_write_file_content_mismatch_is_failed(s5_env, monkeypatch):
++    controller = s5_env["controller"]
++    registry = s5_env["registry"]
++    real_invoke = registry.invoke
++
++    def flaky_invoke(name, args, ctx, approval_response=None):
++        if name == "filesystem.read_file":
++            return ToolResult(tool_name=name, success=True, output="not-what-was-written")
++        return real_invoke(name, args, ctx, approval_response)
++
++    monkeypatch.setattr(registry, "invoke", flaky_invoke)
++
++    task = controller.handle(
++        "save note", explicit_task_type=TaskType.WRITE_FILE,
++        explicit_args={"path": "note.txt", "content": "hello world"},
++    )
++    assert task.status == TaskStatus.FAILED
++    assert task.subtasks[0].verification_state == VerificationState.FAILED
++    assert task.subtasks[0].attempts == 3  # same retry policy as the fallback path
++
++
++def test_specialist_routed_edit_file_content_mismatch_is_failed(s5_env, monkeypatch):
++    _seed_file(s5_env, "note.txt", "hello world")
++    controller = s5_env["controller"]
++    registry = s5_env["registry"]
++    real_invoke = registry.invoke
++    call_n = {"n": 0}
++
++    def flaky_invoke(name, args, ctx, approval_response=None):
++        if name == "filesystem.read_file":
++            call_n["n"] += 1
++            if call_n["n"] == 2:
++                return ToolResult(tool_name=name, success=True, output="not-what-was-expected")
++        return real_invoke(name, args, ctx, approval_response)
++
++    monkeypatch.setattr(registry, "invoke", flaky_invoke)
++
++    task = controller.handle(
++        "edit note", explicit_task_type=TaskType.EDIT_FILE,
++        explicit_args={"path": "note.txt", "old_str": "world", "new_str": "there"},
++    )
++    assert task.status == TaskStatus.FAILED
++    assert task.subtasks[0].verification_state == VerificationState.FAILED
++    assert task.subtasks[0].attempts == 1  # EDIT_FILE stays non-retryable
++
++
++def test_specialist_routed_write_file_readback_failure_is_inconclusive(s5_env, monkeypatch):
++    controller = s5_env["controller"]
++    registry = s5_env["registry"]
++    real_invoke = registry.invoke
++
++    def flaky_invoke(name, args, ctx, approval_response=None):
++        if name == "filesystem.read_file":
++            return ToolResult(tool_name=name, success=False, error="simulated read failure")
++        return real_invoke(name, args, ctx, approval_response)
++
++    monkeypatch.setattr(registry, "invoke", flaky_invoke)
++
++    task = controller.handle(
++        "save note", explicit_task_type=TaskType.WRITE_FILE,
++        explicit_args={"path": "note.txt", "content": "hello world"},
++    )
++    assert task.status == TaskStatus.COMPLETED
++    assert task.subtasks[0].verification_state == VerificationState.INCONCLUSIVE
++    assert task.subtasks[0].attempts == 1
++
++
++def test_specialist_routed_edit_file_readback_failure_is_inconclusive(s5_env, monkeypatch):
++    _seed_file(s5_env, "note.txt", "hello world")
++    controller = s5_env["controller"]
++    registry = s5_env["registry"]
++    real_invoke = registry.invoke
++    call_n = {"n": 0}
++
++    def flaky_invoke(name, args, ctx, approval_response=None):
++        if name == "filesystem.read_file":
++            call_n["n"] += 1
++            if call_n["n"] == 2:
++                return ToolResult(tool_name=name, success=False, error="simulated post-read failure")
++        return real_invoke(name, args, ctx, approval_response)
++
++    monkeypatch.setattr(registry, "invoke", flaky_invoke)
++
++    task = controller.handle(
++        "edit note", explicit_task_type=TaskType.EDIT_FILE,
++        explicit_args={"path": "note.txt", "old_str": "world", "new_str": "there"},
++    )
++    assert task.status == TaskStatus.COMPLETED
++    assert task.subtasks[0].verification_state == VerificationState.INCONCLUSIVE
++    assert task.subtasks[0].attempts == 1
++
++
++def test_specialist_routed_execution_failure_is_not_attempted(s5_env):
++    _seed_file(s5_env, "note.txt", "already here")
++    controller = s5_env["controller"]
++    task = controller.handle(
++        "save note", explicit_task_type=TaskType.WRITE_FILE,
++        explicit_args={"path": "note.txt", "content": "new content", "overwrite": False},
++    )
++    assert task.status == TaskStatus.FAILED
++    assert task.subtasks[0].verification_state == VerificationState.NOT_ATTEMPTED
++
++
++def test_specialist_routed_unverified_tool_stays_not_attempted(s5_env):
++    # LIST_DIRECTORY is also handled by CoderAgent but has no verifier
++    # attached to its ToolSpec -- confirms attaching a verifier to two
++    # specific tools doesn't leak into unrelated ones on the same
++    # specialist.
++    controller = s5_env["controller"]
++    task = controller.handle("list files", explicit_task_type=TaskType.LIST_DIRECTORY, explicit_args={"path": 
+"."})
++    assert task.status == TaskStatus.COMPLETED
++    assert task.subtasks[0].verification_state == VerificationState.NOT_ATTEMPTED
++
++
++def test_specialist_and_fallback_paths_produce_identical_verification_state(s5_env):
++    # The direct cross-check that there is now ONE authoritative
++    # verification mechanism: the same scenario, run once through the
++    # specialist path and once through a bare TaskManager (no executor),
++    # must land on the same VerificationState.
++    controller = s5_env["controller"]
++    specialist_task = controller.handle(
++        "save note", explicit_task_type=TaskType.WRITE_FILE,
++        explicit_args={"path": "a.txt", "content": "hello world"},
++    )
++
++    bare_tm = TaskManager(s5_env["registry"], audit_log=s5_env["audit"])
++    fallback_task = bare_tm.create_task(
++        "save note", explicit_task_type=TaskType.WRITE_FILE,
++        explicit_args={"path": "b.txt", "content": "hello world"},
++    )
++    fallback_task = bare_tm.run_task(fallback_task)
++
++    assert specialist_task.subtasks[0].verification_state == VerificationState.VERIFIED
++    assert fallback_task.subtasks[0].verification_state == VerificationState.VERIFIED
++    assert specialist_task.subtasks[0].verification_state == fallback_task.subtasks[0].verification_state
++
++
++def test_specialist_routed_verification_cannot_bypass_permission_gateway(s5_env, monkeypatch):
++    controller = s5_env["controller"]
++    gateway = s5_env["gateway"]
++    real_check = gateway.check
++
++    def deny_read_file(tool_spec, args, ctx, approval_response=None):
++        if tool_spec.name == "filesystem.read_file":
++            return PermissionDecision(status=ApprovalDecision.DENIED, reason="test-forced-deny")
++        return real_check(tool_spec, args, ctx, approval_response)
++
++    monkeypatch.setattr(gateway, "check", deny_read_file)
++
++    task = controller.handle(
++        "save note", explicit_task_type=TaskType.WRITE_FILE,
++        explicit_args={"path": "note.txt", "content": "hello world"},
++    )
++    assert task.subtasks[0].verification_state == VerificationState.INCONCLUSIVE
++    with open(os.path.join(s5_env["dir"], "note.txt")) as f:
++        assert f.read() == "hello world"
++
++
++def test_specialist_routed_verification_audit_has_no_sensitive_content(s5_env, monkeypatch):
++    secret_marker = "SUPER-SENSITIVE-PAYLOAD-XYZ"
++    controller = s5_env["controller"]
++    registry = s5_env["registry"]
++    real_invoke = registry.invoke
++
++    def flaky_invoke(name, args, ctx, approval_response=None):
++        if name == "filesystem.read_file":
++            return ToolResult(tool_name=name, success=True, output=secret_marker)
++        return real_invoke(name, args, ctx, approval_response)
++
++    monkeypatch.setattr(registry, "invoke", flaky_invoke)
++
++    task = controller.handle(
++        "save note", explicit_task_type=TaskType.WRITE_FILE,
++        explicit_args={"path": "note.txt", "content": secret_marker + "-different"},
++    )
++    entries = s5_env["audit"].for_task(task.id)
++    verification_entries = [e for e in entries if e.action.startswith("verification_")]
++    assert verification_entries
++    for e in verification_entries:
++        assert secret_marker not in e.detail
++
++
++def test_inspect_result_carries_verification_state_to_lanux_s5(s5_env):
++    # Direct unit test of the exact seam LANUXS5Controller uses to
++    # receive a specialist's result: _inspect_result() must surface
++    # verification_state, not just success/denied/output/notes.
++    controller = s5_env["controller"]
++    agent_result = AgentResult(
++        subtask_id="dummy-subtask", role=AgentRole.CODER, success=False,
++        verification_state=VerificationState.FAILED,
++    )
++    inspected = controller._inspect_result(agent_result)
++    assert inspected["verification_state"] == "failed"
+(END)
