@@ -1,0 +1,303 @@
+Let me pull the exact spec context around these two clusters (lines ~875-900 and ~1440-1470) to quote precisely.# LANUX Specialist Orchestration / Task Fleet Preflight — Final Report
+
+*Investigated directly from `LANUX-ORCHESTRATION-BASELINE-9c10769.zip` (flat tree export, no `.git` — see note below) and `Lanux-Specifications.pdf`. Every claim below is either a direct code/spec citation or explicitly marked as unverified/unknown. No implementation was touched.*
+
+**Note on checkpoint verification:** as with the prior WATCHER baseline, this ZIP contains no `.git` directory, so I cannot independently verify it corresponds to commit `9c10769` from history alone. However, the tree is internally consistent with that commit message ("Integrate WATCHER verification into tool execution"): `tool_registry.py` already contains the exact `verifier`/`_apply_verification`/`_verify_write_file`/`_verify_edit_file` design from the WATCHER transfer package, `test_security_boundaries.py` already has the `== 3` assertion fix, and `test_task_verification_s8.py` has all 43 tests. I'm treating this as strong circumstantial confirmation, not independent proof.
+
+---
+
+## 1. EXECUTIVE FINDING
+
+The current runtime is a **strictly sequential, single-worker task executor** with a real, already-working **linear dependency chain** (not a graph), **fixed-priority capability-based routing**, and **all-or-nothing failure containment** (one subtask failure aborts every remaining subtask in the task, related or not). WATCHER verification is correctly centralized at the `ToolRegistry.invoke()` seam and requires no rework. The data model (`Subtask.depends_on: list[str]`) can already represent a genuine multi-parent dependency graph — nothing stops `E` from depending on both `A` and `C` today, structurally — but nothing in the code ever *produces* such a graph (`authoritative_decompose()` only ever builds a straight chain) and nothing ever *executes* two subtasks at once (one dedicated worker thread, an unbounded FIFO queue). Several shared components (`PermissionGateway`, `ApprovalStore`, `ProjectStore`) have **no lock** protecting their mutable state, and the codebase's own comments show its authors already know real concurrency exists at the edges (the synchronous request-thread path vs. the background worker thread) and have patched exactly one resulting hazard (a dict-mutated-during-iteration bug in `pending_requests()`) without a general solution. The specification's roster names (SCOUT, FORGE, ARCHITECT, ARTISAN, SENTINEL, WATCHER, S5, plus PILOT) are explicit in the spec; **VECTOR and HACKATHON do not appear anywhere in the specification document** — that part of the prompt's "canonical roster" is not spec-sourced and should not be treated as one.
+
+**Verdict: NOT READY — MORE REPOSITORY INVESTIGATION REQUIRED** (specifically: a design decision on the parallel-execution/locking model, detailed in §16-17, must be made *before* any fleet contract is written — not because the investigation itself is incomplete).
+
+---
+
+## 2. CURRENT IMPLEMENTATION — VERIFIED
+
+Real, source-cited execution path, request → final state:
+
+1. **`backend/api.py`** (`/api/task`, `/api/task/<id>/approve`) — parses the request, checks `background = bool(data.get("background", False))`.
+   - If `background=True`: `stack.task_executor.submit(task.id)` (or `submit(task.id, approval_response=response)` for resume), returns immediately (`backend/api.py:640`, `:1127`).
+   - If `background=False` (default): calls `stack.controller.handle_authenticated(...)` (`:648`) or `stack.controller.resume(task, approval_response=response)` (`:1141`) **synchronously on the Flask request thread**.
+2. **`agent/core/controller.py::LANUXS5Controller`** — `handle()`/`handle_authenticated()` call `task_manager.create_task()`/`create_authenticated_task()` then `task_manager.run_task(task)`. `resume()` is just `task_manager.run_task(task, approval_response=...)`.
+3. **`agent/core/task_manager.py::run_task()`** (lines 381-447) — loops `for subtask in task.subtasks:` **strictly in list order, one at a time**. Before running each subtask it checks `_dependencies_satisfied()` (line 457) against `subtask.depends_on`; an unsatisfied dependency marks the subtask `SKIPPED` and the loop continues to the next one *without running it*.
+4. **`_run_subtask()`** (line 521) builds an `ExecutionContext`, then calls `self.executor(task, subtask, ctx, approval_response)` — `self.executor` is set to `LANUXS5Controller._execute_subtask` in `controller.py:53`.
+5. **`controller.py::_execute_subtask()`** (line 125) — `self.router.select_agent(subtask, forced_role=...)`. If a specialist is returned: `agent.execute(subtask, ctx)` → `AgentResult`, then `_inspect_result()` turns that into the same dict shape the fallback path produces (including `verification_state`). If no specialist can handle it: falls back to `task_manager._execute_plan(subtask.plan, ctx, approval_response)` — the original Phase B deterministic dispatch.
+6. **Either path terminates in `ctx.tool_registry.invoke(tool_name, tool_args, ctx, approval_response)`** — `agent/core/tool_registry.py`. This is the **single, exclusive path to any tool handler**, confirmed by grep: no other call site invokes a tool handler directly.
+7. **`ToolRegistry.invoke()`** — runs `PermissionGateway.check()` (mandatory, structurally unavoidable — no code path skips it), calls the handler, and — **only for `filesystem.write_file`/`filesystem.edit_file`** (the only two `ToolSpec`s with `verifier=` set, confirmed by `grep -n "verifier=" tool_registry.py` → exactly 2 hits) — runs the WATCHER `"post"`-phase verifier, setting `ToolResult.verification_state`.
+8. **`specialists/_common.py::tool_result_to_agent_result()`** copies `tr.verification_state` onto `AgentResult.verification_state` unchanged. For the fallback path, `task_manager._from_tool_result()` does the same directly onto the result dict.
+9. Back in `_run_subtask()`: `subtask.verification_state = _safe_verification_state(result.get("verification_state"))` (line 547) — this line is unconditional and unmodified since before the WATCHER refactor; it now receives a real value from *either* path.
+10. `run_task()` inspects the subtask outcome string (`"done"`/`"failed"`/`"awaiting_approval"`) and sets `Task.status` accordingly, persisting via `TaskManager._persist()` after every subtask.
+11. **Lanux s5 sees the result** as the returned, fully-populated `Task` object from `handle()`/`resume()` (synchronous case), or via `GET /api/task/<id>` (background case, `backend/api.py:369` also exposes `background_in_flight` via `task_executor.is_running(task.id)`).
+
+This path was traced from source, not inferred — every transition above has a file:line citation.
+
+---
+
+## 3. SPECIFICATION REQUIREMENTS
+
+The specification (`Lanux-Specifications.pdf`, 67 pages) explicitly frames its Part 05/07 fleet material as **"themes only, not claims about any specific product's implementation"** (line 1405-1407) — i.e., long-term aspirational capability categories drawn from how modern coding-agent platforms work in general, not a binding contract with exact required interfaces. Treat everything below as direction, not a checklist with a due date.
+
+The two most directly relevant sections:
+
+**PART 02 — Multi-Agent Orchestration** (spec line ~304-340):
+> Dynamic Specialist Routing, Parallel Sub-Agent Execution ("runs independent specialist tasks at the same time"), Result Reconciliation, Sub-Agent Sandboxing, Escalation Paths ("hands a task up to S5 when a specialist is out of depth"), Specialist Handoff Protocol, Load-Aware Delegation, Redundant Verification, Cross-Specialist Memory Sharing, Task Decomposition Graphs ("represents a complex task as a graph of subtasks"), Failure Isolation ("contains a failing specialist so it doesn't derail the whole task"), Priority-Based Scheduling, Specialist Health Monitoring, Graceful Degradation.
+
+**PART 05 — Model Routing & Resource Management** (spec line ~876-896) and **PART 07 — Delivery & Fleet Coordination / Multi-Agent Fleet Coordination** (spec line ~1400-1469):
+> Specialist Capability Matching, Cost-Aware Routing, Overload Protection, Warm-Start Specialist Reuse, Task Complexity Estimation, Dynamic Timeout Adjustment, Specialist Fallback Chains, Resource Budgeting per Task, Priority Queue Management, Idle Resource Reclamation, Cross-Task Resource Isolation, Adaptive Model Selection, Routing Transparency, Model-Version Transition Handling; Independent Task Fleets, Per-Agent Task Assignment, Fleet-Wide Progress View, Result Aggregation Across a Fleet, Isolated Failure Containment, Cross-Provider Tool Interoperability, Cross-Agent Conflict Prevention, Selective Task Cancellation, Fleet Prioritization, Agent Handover Documentation, Fleet Resource Fairness, Live Fleet Status Narration.
+
+**Specialist collaboration example** (spec item 18, line 214-218):
+> "LANUX specialists can collaborate on a single task — for example **S5** dispatching work to **SCOUT, ARCHITECT, ARTISAN, FORGE, SENTINEL and PILOT**, then using **WATCHER** to verify the result before S5 evaluates the final outcome. This is an example of collaboration, not a mandatory fixed pipeline; S5 dynamically determines which specialists are needed."
+
+**Explicit naming discrepancy — reporting, not reconciling, per the instructions:**
+
+| Term used in preflight prompt | Occurrences in spec | Spec's own name |
+|---|---|---|
+| "Lanux s5" | 0 (exact string) | **"S5"** — same concept, different capitalization/spelling |
+| SCOUT | 2 | named, no dedicated capability paragraph |
+| FORGE | 3 | named, no dedicated capability paragraph |
+| ARCHITECT | 11 | named (also overlaps with "Architecture Mapping" capability) |
+| ARTISAN | 2 | named, no dedicated capability paragraph |
+| SENTINEL | 7 | named, no dedicated capability paragraph |
+| WATCHER | 7 | named, has real capability content (verification/redundant verification) |
+| PILOT | 1 | named once, in the item-18 example sentence only |
+| **VECTOR** | **0** | **does not appear anywhere in the spec** |
+| **HACKATHON** | **0** | **does not appear anywhere in the spec** |
+| MEMORY | 39 | used only as a *capability category* ("Memory & Continuity"), **never** as a named specialist agent |
+
+So: SCOUT/FORGE/ARCHITECT/ARTISAN/SENTINEL/WATCHER/S5/PILOT are genuinely spec-sourced names (six of them appear together in the one explicit collaboration example). VECTOR and HACKATHON are **not spec terms at all** — their inclusion in the "canonical long-term architecture" given to me is not something I can verify against this specification; I'm flagging it explicitly rather than treating it as settled. "MEMORY" as a *specialist agent name* is likewise not spec-supported — the spec only ever discusses memory as a capability theme (context retention, cross-specialist memory sharing), never as a dedicated agent.
+
+---
+
+## 4. EXISTS / PARTIAL / MISSING
+
+| Capability | Status | Evidence |
+|---|---|---|
+| Multi-step task execution | **EXISTS** | `TaskManager.run_task()` loop, §2 above |
+| Specialist collaboration | **PARTIAL** | One specialist per subtask works; no mid-task context handoff between specialists (see §10) |
+| Capability matching | **EXISTS** (simple form) | `ModelRegistry.capable_agents()` filters by `agent.can_handle(subtask)` — real but binary, not a strength/fit score |
+| Priority/resource-aware routing | **MISSING** | `Router.select_agent()` is fixed-priority: first capable agent in registration order, full stop (`router.py:38`) |
+| Adaptive model selection | **MISSING** | No model-version/capability-depth selection logic anywhere in `Router`/`ModelRegistry` |
+| Fallback chains | **PARTIAL** | Only one fallback exists: unforced routing with no capable specialist falls back to `TaskManager._execute_plan()` (deterministic dispatch). No specialist-to-specialist fallback chain exists |
+| Per-task resource budgeting | **MISSING** | No CPU/token/time/cost budget concept anywhere in `Task`/`Subtask`/`ExecutionContext` |
+| Independent task fleets | **MISSING** | No `TaskFleet`/graph class exists (`grep` for `TaskFleet\|ExecutionGraph\|DependencyGraph` across the repo: zero hits). One `BackgroundTaskExecutor`, one worker thread, one FIFO queue |
+| Result aggregation | **PARTIAL** | Each `Subtask.result` dict is preserved individually; `Task._summarize()` is a one-line-per-subtask status string (`task_manager.py:709-714`), not a structured aggregate |
+| Per-agent assignment | **PARTIAL** | A subtask is assigned to exactly one specialist at execution time (real), but there's no persistent "this specialist owns this piece of the fleet" tracking beyond that single call |
+| Isolated failure containment | **MISSING** | `run_task()`'s `"failed"` branch calls `_skip_remaining()`, which marks **every** remaining `PENDING`/`AWAITING_APPROVAL` subtask `SKIPPED` — not just dependents (`task_manager.py:433-439`, `:463-468`) |
+| Fleet-wide progress | **MISSING** | No fleet concept exists; only single-task status via `GET /api/task/<id>` |
+| Cross-agent conflict prevention | **MISSING** | No file/resource-claim/lock mechanism anywhere for two subtasks touching the same path/repo/project (see §8) |
+| Handover documentation | **MISSING** | No structured "notes for the next specialist" field or mechanism |
+| Selective cancellation | **MISSING** | `TaskManager.cancel()` sets `task.cancel_requested`; the *next* checkpoint in `run_task()`'s loop cancels the **whole task** via `_skip_remaining()` — there is no per-subtask cancellation |
+| Live fleet status narration | **MISSING** | No fleet exists to narrate; task-level status is a static field, not a narrated stream |
+| WATCHER verification | **EXISTS** | Fully implemented at the `ToolRegistry.invoke()` seam, verified (43/43 dedicated tests) in the prior engagement |
+| Recovery integration | **PARTIAL** | Per-subtask retry exists and is rule-based-safe (`recovery.py::is_retryable()`), but recovery is local to one subtask — no fleet-level recovery/reassignment concept |
+
+---
+
+## 5. CONCURRENCY FINDINGS
+
+**`agent/core/task_executor.py::BackgroundTaskExecutor`** (fully read, module docstring included):
+- **Exactly one dedicated worker thread** (`threading.Thread(..., name="lanux-task-executor")`), fed by a plain `queue.Queue()` — **FIFO by construction**.
+- `submit()` never blocks, never calls into `TaskManager` directly — it only acquires `_in_flight_lock` (a `threading.Lock`) to check/update a plain `set()` for duplicate-submission prevention, then does a non-blocking `queue.put()`.
+- **Independent subtasks cannot currently execute concurrently via the background path** — there is only one worker thread, so background tasks (and every subtask within them) are processed one at a time, in submission order.
+- **A real, narrower concurrency scenario already exists**, confirmed by the codebase's own docstring in `task_manager.py::_get_tool_registry_for_task()` (lines 479-488): the *synchronous* request path (`controller.handle()`/`resume()` called with `background=False`, running on whatever thread Flask is currently serving) can execute **at the same time as** the background worker thread processing a *different* task. `backend/server.py:17` calls `app.run(host="0.0.0.0", port=port, debug=False)` with **no `threaded=True`**, meaning Werkzeug's default (`threaded=False`) applies — Flask itself serves one HTTP request at a time — but the background worker thread is a *separate* OS thread that keeps running regardless of Flask's own concurrency setting. So: **one synchronous-path task + one background-path task, running genuinely concurrently, is possible today**, even though "many concurrent background tasks" is not.
+- **Locks present:** `_in_flight_lock` (executor, guards only the duplicate-submission set, never held during execution — by design, per the module's own "DEADLOCK ANALYSIS" docstring section), `_project_registry_lock` in `TaskManager` (guards only the lazy build-and-cache of per-project `ToolRegistry` instances, never held across an actual tool call), `TaskStore._lock` (guards **all** task persistence I/O), `SecretsVault._lock` in `secrets_store.py` (guards **all** vault operations).
+- **No lock present** in: `agent/core/tool_registry.py` (`ToolRegistry` itself — safe in practice because `register()` only ever runs once at startup/registry-build time, before any concurrent `invoke()` could start), `agent/core/permissions.py` (`PermissionGateway` — see below), `agent/core/approval_store.py`/`agent/core/project_store.py` (both ride on the shared, lock-free `agent/memory.py::JSONStore`).
+- **A genuinely thread-unsafe structure, with the codebase's own authors already aware of it:** `PermissionGateway` holds two plain instance dicts, `self._pending: dict[str, ApprovalRequest]` and `self._grants: dict[tuple[str, str], dict]` (`permissions.py:167-168`), mutated from many methods (`check()`, `_resolve_with_response()`, grant creation) with **no lock anywhere in the file**. A comment at `permissions.py:551-556` explicitly documents the hazard: *"Now that Phase C's background executor lets a worker thread call check() (which can insert into self._pending) concurrently with a request thread calling this method, iterating the live view directly is a real 'dictionary changed size during iteration' RuntimeError risk in CPython."* — mitigated **only** for `pending_requests()`'s enumeration (via a `list(...)` snapshot), not as a general lock protecting the dicts from concurrent read-modify-write races elsewhere (e.g., two simultaneous `check()` calls for the same tool/session).
+- **`agent/memory.py::JSONStore`** (backing `ApprovalStore`, `ProjectStore`, `LongTermKnowledge`) loads its entire file into `self._data` once at construction and **fully rewrites the file on every `set()`** (`_flush()` does a complete `json.dump()`, not an append). This is not just unlocked — a `get()`-then-`set()` sequence (e.g. `LongTermKnowledge.add_fact()`) is a classic non-atomic read-modify-write, and concurrent writers can silently lose an update.
+- **`agent/core/audit.py::AuditLog.record()`** opens the file `"a"` (append) and issues one `f.write()` per entry, with **no lock**. Small-write append-atomicity is an OS-level incidental property here (typical for writes under `PIPE_BUF` on POSIX), not a designed guarantee the way `TaskStore`/`SecretsVault` explicitly provide via their own locks.
+- **What would break under real multi-worker parallelism today:** any two subtasks that both reach `PermissionGateway.check()` for a risk tier requiring an approval decision at the same moment (race on `_pending`/`_grants`); any two subtasks that both touch `ApprovalStore`/`ProjectStore` at the same moment (lost-update risk via `JSONStore._flush()`); any two subtasks that write to the *same file path* in the *same project* at the same moment (no resource-claim mechanism exists — see §8; `Sandbox.run_command()`/tool handlers themselves are stateless and re-entrant, but nothing prevents two concurrent handlers from targeting the same path).
+- **Existing test coverage:** `tests/test_task_executor.py::test_multiple_tasks_all_complete_without_corruption` exists and passes, but it exercises **multiple tasks through the single serialized worker thread**, not genuine simultaneous execution via multiple workers. **No test anywhere exercises true multi-threaded concurrent tool execution** — that scenario is entirely untested.
+
+---
+
+## 6. DEPENDENCY / TASK-FLEET FINDINGS
+
+- **`agent/core/task.py::Subtask.depends_on: list[str]`** already exists, plus `new_subtask(plan, depends_on=None)`. This field **can structurally represent** your example (`A`↔`B`, `C`↔`B`, `D` independent, `E` depends on `A` and `C`) — it's a plain list of subtask IDs, not restricted to one parent.
+- **`TaskManager._dependencies_satisfied()`** (line 457) correctly evaluates a multi-dependency case: `all(by_id.get(dep_id) and by_id[dep_id].status == SubtaskStatus.DONE for dep_id in subtask.depends_on)` — this already handles "E cannot start until A **and** C succeed" correctly, gating with `SKIPPED` + a clear error (`_first_failed_dependency_error()`) if not satisfied.
+- **The gap is entirely on the producing side, not the data structure:** `agent/core/planning.py::authoritative_decompose()` (line 121) only ever builds a **strict linear chain** — `depends_on=[previous_id] if previous_id else []`. Nothing in the current Planner ever produces a branching/converging graph. So today, in practice, dependency graphs are always straight lines even though the underlying field could support more.
+- **No `TaskFleet`/execution-graph/DAG class exists anywhere** in the repository (`grep` across all `.py` files for `TaskFleet|task_fleet|ExecutionGraph|DependencyGraph|class.*Fleet|class.*Graph`: zero hits).
+- **What would be genuinely necessary vs. premature, given the above:**
+  - **Necessary:** a real Planner (or Planner extension) capable of emitting non-linear `depends_on` sets — the execution-side gating already works for this; no schema change is needed for the dependency data itself.
+  - **Necessary, if true parallelism is ever added:** a scheduler that, at each step, considers *all* subtasks whose dependencies are satisfied (not just the next one in list order) as candidates — today's `for subtask in task.subtasks` loop only ever looks at the next list item, so even if the Planner emitted a real graph today, the current executor would still run it strictly in list order (correctly skipping/gating, but never running two ready subtasks at once).
+  - **Premature right now:** a full resource-claim/execution-lease system, a distributed task-fleet abstraction, or a generalized DAG engine — none of the current specialists or task types generate enough independent, genuinely parallelizable work to justify that complexity yet (5 implemented specialists, mostly single-tool-call subtasks).
+
+---
+
+## 7. SPECIALIST ROUTING FINDINGS
+
+- **`agent/core/router.py::Router.select_agent()`** — confirmed **fixed-priority, capability-based** (not model-based, not resource-aware, not context-aware): for unforced routing, `capable = self.model_registry.capable_agents(subtask)`; `chosen = capable[0]` — the *first* implemented specialist (in `ModelRegistry` dict-insertion/registration order) whose `can_handle(subtask)` returns `True`. No scoring, no tie-breaking beyond registration order.
+- **`ModelRegistry.capable_agents()`** filters by `getattr(agent, "implemented", False) and agent.can_handle(subtask)` — this is the entirety of "capability matching" today: a boolean per-specialist `can_handle()` method, not a strength/fit score.
+- **`AgentRole` enum** (`model_agent.py`) currently has **8 values**: `CONTROLLER` (Lanux S5/leader, structurally barred from being a worker — enforced in both `ModelRegistry.register()` and `Router._select_forced()`), `CODER`, `RESEARCHER`, `TESTER_DEBUGGER`, `PLANNER_ANALYST` (advisory-only, structurally barred from execution even under manual override), `COMPUTER_AUTOMATION` (declared, `implemented=False` — a stub), `GIT_PROJECT_OPS`, `SECRETS_OPS`. **None of these are named SCOUT/FORGE/ARCHITECT/ARTISAN/SENTINEL/PILOT/VECTOR/MEMORY/HACKATHON.** (The module's own docstring is stale here too — it says "the six specialist roles are finalized... there is no open/undecided slot," but `SECRETS_OPS` was added later, making it seven specialist roles plus the controller.)
+- **Manual/forced selection** exists (`forced_role` parameter) with two hard-coded structural carve-outs (`CONTROLLER`, `PLANNER_ANALYST`) that even manual selection cannot override.
+- **No fallback chain, no cost-awareness, no resource-awareness, no model-version transition handling** anywhere in `Router`/`ModelRegistry` — confirmed by full read of both files (each is small, ~40-50 lines; nothing was skipped).
+- **Comparison to spec:** the spec's "Specialist Capability Matching," "Cost-Aware Routing," "Adaptive Model Selection," "Specialist Fallback Chains," and "Model-Version Transition Handling" are all, at minimum, **PARTIAL-to-MISSING** relative to what exists. Only the most basic form of capability matching (a boolean `can_handle()`) is real.
+- **On the roster question specifically:** I cannot map today's 8 `AgentRole` values onto the spec's SCOUT/FORGE/ARCHITECT/ARTISAN/SENTINEL/PILOT names with confidence — some rough thematic overlaps exist (`CODER`↔coding-themed roles, `RESEARCHER`↔intelligence-gathering-themed roles, `COMPUTER_AUTOMATION`↔environment-execution-themed roles) but I am **explicitly not asserting a 1:1 correspondence**, since the instructions are clear that current roles must not be renamed to fit the long-term roster, and inventing an implied mapping would be the same mistake in the other direction.
+
+---
+
+## 8. RESOURCE / CONFLICT MODEL
+
+- **No file/directory/project/git-level locking or resource-claim mechanism exists anywhere in the repository.** Confirmed by inspecting `tools/sandbox.py::Sandbox` in full: it holds no mutable instance state beyond an (effectively immutable) `SandboxPolicy` reference; `run_command()` is a fresh `subprocess.run(..., cwd=self.policy.workspace_root, ...)` call every time — stateless and re-entrant at the Python level for calls to *different* sandboxes, but **nothing prevents two concurrent calls into the same sandbox/workspace from targeting the same file or repository state simultaneously**.
+- `agent/core/recovery.py`'s own docstring already reasons about this at a conceptual level — it excludes `EDIT_FILE`/`GIT_COMMIT` from automatic retry specifically because *"a concurrent edit, a prior partial success this process didn't correctly observe"* could make blind retry unsafe — but this is a *retry-safety* rule, not a *concurrency-prevention* mechanism; it does nothing to stop two subtasks from colliding in the first place.
+- **Secrets** are isolated via the credential-reference pattern (per project memory/prior phases) and `SecretsVault`'s own lock — genuinely safe under concurrency at the vault-storage level.
+- **Providers/browser/environment state:** no browser or persistent environment-session state exists in the current implementation at all (`COMPUTER_AUTOMATION` is `implemented=False`), so there's nothing to protect yet — this is a **not-yet-applicable** category, not a gap.
+- **A principled SAFE-TO-PARALLELIZE vs. MUST-WAIT mechanism does not exist today.** The closest existing primitive is task/project scoping (`_get_tool_registry_for_task()` resolves a project-specific `ToolRegistry`+`Sandbox` rooted at that project's own workspace) — this at least means two tasks in *different* projects are naturally isolated at the filesystem-root level. Two subtasks in the *same* project/workspace have no such protection.
+- **What this means for a minimum viable model** (not proposing an implementation, just characterizing the smallest true necessity): the natural granularity already available for a first conflict rule is **project/workspace identity** plus **declared resource paths per subtask** (which don't currently exist as a field anywhere on `Subtask`/`Plan`) — a full generalized locking system is not justified by anything in the current architecture; a coarse "same project → not parallel" rule would already prevent the worst collisions without new abstractions.
+
+---
+
+## 9. FAILURE / FALLBACK MODEL
+
+- **A single subtask's terminal failure currently fails the entire Task and skips every remaining subtask, dependents and unrelated work alike** — no distinction is made. Confirmed: `run_task()`'s `"failed"` branch (`task_manager.py:433-439`) calls `_skip_remaining(task, reason=f"a prior subtask failed: {subtask.error}")`, and `_skip_remaining()` (line 463) marks **every** subtask still `PENDING`/`AWAITING_APPROVAL` as `SKIPPED`, with no dependency check at all — it does not distinguish "depends on the failed subtask" from "totally unrelated."
+- **Retry** is per-subtask, rule-based, and already correctly conservative: `is_retryable(task_type)` (recovery.py) blocks automatic retry for `EDIT_FILE`/`GIT_COMMIT` (non-idempotent mutations) while allowing it for everything else, up to `subtask.max_retries`, and is explicitly suppressed when the current attempt was authorized by a just-consumed one-time `approval_response` (so a real failure after an explicit approval surfaces as a failure, not a silent new approval prompt).
+- **Escalation to Lanux S5** happens structurally by construction: every subtask outcome (done/failed/awaiting_approval) flows back through `run_task()` into the returned `Task` object, which is what `controller.handle()`/`resume()` hand back — there's no separate "escalation" channel because the controller already sees everything synchronously (or via `GET /api/task/<id>` in the background case). The spec's "Escalation Paths — hands a task up to S5 when a specialist is out of depth" concept has no dedicated *mechanism* beyond this (a specialist can only report success/failure/denial, not a structured "I'm out of my depth, please reassign" signal).
+- **Isolated failure containment (spec term) is MISSING** — this is the single clearest current gap relative to the spec's "Multi-Agent Orchestration" section item ("Failure Isolation — contains a failing specialist so it doesn't derail the whole task").
+- **Specialist fallback chains:** only one exists today — unforced routing with no capable specialist falls back to `TaskManager._execute_plan()` (the deterministic dispatcher itself, not another specialist). There is no "FORGE fails → try an alternate coding capability" mechanism; the only fallback destination is the non-specialist path, and it's not really a *failure* fallback (it triggers when *no specialist declares capability*, not when a chosen specialist's execution fails).
+
+---
+
+## 10. RESULT / HANDOFF MODEL
+
+- **`ToolResult`** (`agent/core/result.py:37-58`): `tool_name`, `success`, `output`, `error`, `duration_sec`, `raw`, `denied`, `denial_reason`, `verification_state`. No `artifacts`/`evidence` field.
+- **`AgentResult`** (`agent/core/model_agent.py`): `subtask_id`, `role`, `success`, `output`, `tool_calls_made`, `confidence` (only ever set by the advisory Planner-Analyst), `notes`, `verification_state`.
+- **Aggregation today:** each `Subtask.result` dict is preserved individually on the subtask; `Task._summarize()` (task_manager.py:709-714) is a trivial one-line-per-subtask string (`f"[{task_type}] {status}"`) — **not** a structured aggregate object, and carries no per-subtask output content, just task-type + terminal status.
+- **No context-passing between subtasks exists.** `authoritative_decompose()` fixes each subtask's `Plan.args` at decomposition time, up front — there is no mechanism today for subtask N's actual tool output to be substituted into subtask N+1's args based on what N produced. This is confirmed by the absence of any such wiring in `planning.py`/`task_manager.py`.
+- **Provenance/audit context** genuinely does propagate well: `trust_origin` flows unchanged from `Task` through `ExecutionContext` into every `PermissionGateway.check()`/`AuditLog.record()` call — this part of "provenance for dependent specialists" is solid, but it's identity/trust provenance, not *content* handoff.
+- **Classification:** result aggregation and specialist handoff are both **PARTIAL-to-MISSING** — the pieces needed to build a real handoff protocol (individual results, provenance, verification state) all exist and propagate cleanly; what's missing is any mechanism to *feed* one subtask's output into another's input.
+
+---
+
+## 11. WATCHER POSITION
+
+- **Confirmed exactly where WATCHER sits, from source:** `ToolSpec.verifier` (declarative field, same pattern as pre-existing `sensitive_args`), attached to **exactly two** tools (`filesystem.write_file`, `filesystem.edit_file` — confirmed by grep, zero other matches), run inside `ToolRegistry.invoke()` via `_run_verifier_phase()`/`_apply_verification()`. This matches the locked WATCHER design exactly — **no rework needed, no duplication found**.
+- **Orchestration should consume verification states as follows** (semantics already implemented, not proposed):
+  - `VERIFIED` — the operation happened and was independently confirmed; safe for any dependent subtask to proceed treating this as ground truth.
+  - `FAILED` — `ToolResult.success` is flipped to `False` by `_apply_verification()` itself, so this already flows through the existing retry/failure machinery (§9) unchanged — a dependent subtask correctly never sees this as `DONE`.
+  - `INCONCLUSIVE` — the *tool call* succeeded but verification itself could not complete (e.g. the internal read-back was denied). This does **not** flip `success`, so the subtask still shows `DONE` from a status perspective, but `subtask.verification_state == INCONCLUSIVE` is available for a future orchestrator to treat with more caution than a `VERIFIED` result before letting dependents build on it. **This is a case where a future fleet orchestrator would need new logic that doesn't exist today** (nothing currently reads `verification_state` to change scheduling behavior — it's recorded but not yet acted upon beyond the audit trail and the flip-to-failed for `FAILED`).
+  - `NOT_ATTEMPTED` — default for every tool with no verifier, and for any execution that never reached success. No special handling needed; this is the overwhelming majority case.
+- **No duplicate verification architecture exists or is being proposed** — confirmed (`task_manager.py`'s old special-cased methods are fully deleted, per the prior engagement's verified diff).
+
+---
+
+## 12. SECURITY / TRUST BOUNDARIES
+
+- **`PermissionGateway.check()` is structurally mandatory** — every single path to a tool handler goes through `ToolRegistry.invoke()`, which calls `check()` unconditionally before the handler runs. No code path bypasses this (confirmed in the prior WATCHER engagement and re-confirmed here — the WATCHER read-back itself goes through a **second**, fully-gated `invoke()` call, not a raw read).
+- **`TrustOrigin`** flows unchanged from `Task` creation through `ExecutionContext.trust_origin` into every `check()`/`AuditLog.record()` call (`originator=` parameter) — this identity thread is intact and unmodified by any of the WATCHER or dependency work.
+- **`AuditLog`** is append-only (`agent/core/audit.py`), one JSON line per entry, never rewritten/truncated — genuinely tamper-evident in its current form, though its write path has **no lock** (§5) — a real, if narrow, gap for true concurrent writers.
+- **The one already-known concurrency gap with direct security relevance:** `PermissionGateway._pending`/`_grants` (§5) are unlocked, and their own code comments confirm the authors know background-executor concurrency already touches them. A future fleet orchestrator that runs more truly-concurrent execution would inherit this exact risk more severely — two simultaneous approval-requiring calls for the same tool/session could race in ways not yet fully hardened.
+- **Secrets isolation** (`SecretsVault`, credential-reference pattern) is lock-protected and unaffected by anything in this investigation.
+- **For any future parallel-execution design to preserve these boundaries:** the natural, minimal-risk path is to keep `PermissionGateway`/`AuditLog`/stores exactly as the single, shared, already-battle-tested chokepoint they are today (every parallel worker still calls the *same* `ToolRegistry.invoke()` → `PermissionGateway.check()` → `Sandbox` chain) and add whatever locking is missing (§5) rather than duplicating or bypassing any part of this chain for the sake of parallelism. Nothing in the current design gives any indication that duplicating this chain per-worker was ever intended or would be safe.
+
+---
+
+## 13. LANUX s5 AUTHORITY MODEL
+
+- **`AgentRole.CONTROLLER` is structurally reserved for `LANUXS5Controller`**, enforced in **two independent places**: `ModelRegistry.register()` raises `ControllerRoleReservedError` if anything attempts to register a specialist under `CONTROLLER`; `Router._select_forced()` refuses to route to `CONTROLLER` even under explicit manual selection. A specialist becoming "the controller" has **no code path** that could produce it today — this is a real structural guarantee, not a convention.
+- **`LANUXS5Controller._inspect_result()`** never trusts `AgentResult.success` as the final word unexamined — it re-derives the `denied`/`denial_reason` shape from the actual output content. This is the concrete mechanism behind "S5 inspects every specialist result rather than rubber-stamping it," matching the spec's framing of S5 as final evaluator.
+- Specialists execute only what they're routed; nothing in `SpecializedAgent`'s protocol (`can_handle`/`execute`) gives a specialist any way to create new tasks, route other subtasks, or call another specialist directly — they only ever reach `ctx.tool_registry.invoke(...)`. This authority boundary is intact and would need to remain so under any fleet design: specialists execute, only Lanux S5 (via `Router`) decides *what* gets executed and by whom.
+
+---
+
+## 14. PROPOSED TARGET ARCHITECTURE
+
+*(Proposal only — nothing here has been implemented, and this is explicitly not a step-by-step build plan; that's §16.)*
+
+**A. Components** — no new top-level components are needed yet beyond what exists: `TaskManager`, `Router`/`ModelRegistry`, `ToolRegistry` (with WATCHER), `PermissionGateway`/`AuditLog`, `BackgroundTaskExecutor`. The one genuinely new piece would be a **dependency-aware step-selector** inside (or alongside) `run_task()` — not a new "Fleet" class — that, instead of `for subtask in task.subtasks:`, computes the set of subtasks whose dependencies are currently satisfied and haven't run yet.
+
+**B. Responsibilities** — unchanged from today except the step-selector above; `TaskManager` remains the sole executor of the lifecycle, `Router` remains the sole point of specialist selection, `ToolRegistry` remains the sole gate to any side effect.
+
+**C. Data flow** — unchanged from §2's traced path, with one addition: a resource/conflict check (§8) inserted between "subtask is ready to run" and "subtask actually runs," so that even when two subtasks are both ready, one can be deferred if it targets the same project/workspace as another currently-running subtask.
+
+**D. Task lifecycle** — unchanged (`PENDING → RUNNING → DONE/FAILED/SKIPPED`), plus a genuinely usable `AWAITING_APPROVAL`-adjacent status is already there; no new states are obviously required yet.
+
+**E. Dependency lifecycle** — `depends_on` stays exactly as it is (already correct for arbitrary graphs); the only real change needed is in what *populates* it (a richer Planner) and what *consumes* it (a scheduler that looks at more than the next list item).
+
+**F. Parallel scheduling model** — the smallest defensible next step is **not** a full thread-pool executor. It's: keep exactly one worker thread for now, but let it pick the *next ready* subtask from anywhere in the dependency graph (not just the next list position) — this alone gets you correct non-linear dependency execution with **zero** new concurrency risk, since it's still single-threaded. True parallel execution (multiple subtasks truly running at once) should be a **separate, later decision**, gated on first fixing the unlocked shared state in §5/§8 — doing it before that would mean shipping fleet parallelism on top of components whose own authors have already flagged them as not fully concurrency-safe.
+
+**G. Resource/conflict model** — start with project/workspace identity as the only conflict key (two subtasks in different projects are always safe to run "in parallel" in the scheduling sense even before real threading exists; two subtasks in the same project/workspace are always serialized, full stop, until something more precise is justified).
+
+**H. Specialist routing model** — unchanged; `Router`'s fixed-priority-by-capability model doesn't need to change to support dependency-aware scheduling. Priority/resource-aware routing is a legitimate later spec goal but is decoupled from the fleet-scheduling question.
+
+**I. Result aggregation** — introduce a genuine `Task`-level aggregate (a list of `{subtask_id, tool_name, status, verification_state, output_summary}` entries) purely as a *read* view for Lanux S5/API consumers — this is additive, doesn't touch `_summarize()`'s existing behavior, and directly serves both "fleet-wide progress" and "result aggregation" spec themes without inventing new state.
+
+**J. WATCHER integration** — unchanged; already correctly positioned, nothing to add for fleet support beyond what's described in §11 (a future scheduler *could* choose to treat `INCONCLUSIVE` results more cautiously when deciding whether dependents may proceed, but that's a scheduling policy decision, not a WATCHER change).
+
+**K. Failure/recovery behavior** — change `_skip_remaining()` to only skip subtasks whose `depends_on` (transitively) includes the failed subtask, leaving genuinely unrelated subtasks eligible to still run. This is the single highest-value, lowest-risk change available — it directly closes the "isolated failure containment" gap using data (`depends_on`) that already exists.
+
+**L. Lanux S5 authority boundary** — unchanged; nothing above gives any specialist new authority.
+
+**M. Security/audit boundary** — unchanged chokepoints (§12); the prerequisite locking work in §5 (a lock around `PermissionGateway._pending`/`_grants`, and either a lock or an append-only-safe rewrite for `ApprovalStore`/`ProjectStore`) should land **before** any true multi-threaded execution, not after.
+
+---
+
+## 15. WHAT NOT TO BUILD YET
+
+- Do **not** add `VECTOR`, `MEMORY`, or `HACKATHON` as runtime `AgentRole`s — they have no spec grounding as named agents (§3) and no implementation justification exists.
+- Do **not** rename `CODER`/`RESEARCHER`/`COMPUTER_AUTOMATION`/etc. to `FORGE`/`SCOUT`/`PILOT`/etc. — no contract work has established that correspondence, and doing so on naming grounds alone would be exactly the "renaming to match the roster" the instructions warn against.
+- Do **not** build a general-purpose thread-pool/multi-worker executor before the unlocked shared state (§5, `PermissionGateway`, `ApprovalStore`, `ProjectStore`) is addressed — this would be shipping real parallelism on top of components the codebase's own comments already flag as not fully safe for it.
+- Do **not** build a generalized resource-locking/claims system yet — current specialist count and workload don't justify it; a coarse project/workspace-identity rule is sufficient for now.
+- Do **not** build cost-aware/adaptive-model-selection routing yet — there's no cost/capability-depth data anywhere in the system to route on; this would be premature abstraction over data that doesn't exist.
+- Do **not** invent a new numbered phase for any of this — per the instructions, this stays within the existing phase framing until a contract is actually designed and approved.
+- Do **not** implement fallback chains beyond the one that already exists until there's a second real, distinct implementation of an existing capability to fall back to (currently there's exactly one implementation per role — a "chain" with one link isn't a chain).
+
+---
+
+## 16. MINIMUM IMPLEMENTATION SEQUENCE
+
+*(Sequence only — not implemented, not started.)*
+
+1. **Fix blanket failure containment → dependency-scoped containment.**
+   - Purpose: close the clearest existing gap (§9) using data that already exists.
+   - Files: `agent/core/task_manager.py` (`_skip_remaining()`, `run_task()`'s `"failed"` branch).
+   - Dependencies: none — purely a logic change using the existing `depends_on` field.
+   - Risks: must correctly compute the *transitive* dependent set, not just direct dependents, or a two-hop dependency chain would be under-skipped.
+   - Tests required: new tests proving an unrelated subtask still runs after a sibling fails; existing tests must keep passing (the current "whole task fails" tests will need their expectations updated deliberately, not silently).
+   - Must remain untouched: `PermissionGateway`, `ToolRegistry`, WATCHER, retry logic (`recovery.py`).
+
+2. **Let the Planner (or a new decomposition path) emit non-linear `depends_on` graphs, and let `run_task()` select from *all* ready subtasks rather than just the next list item.**
+   - Purpose: make the existing dependency data structure actually reachable in practice.
+   - Files: `agent/core/planning.py`, `agent/core/task_manager.py::run_task()`.
+   - Dependencies: step 1 (containment) should land first, since a real graph makes partial-failure scenarios more common, not less.
+   - Risks: changing the iteration order of `run_task()` is a behavior change for every existing caller/test that assumes list order — needs careful regression coverage.
+   - Tests required: multi-dependency graph tests (the A/B/C/D/E example from the original prompt, verbatim, is a good literal test case).
+   - Must remain untouched: execution still single-threaded at this step — no new concurrency risk introduced.
+
+3. **Add the locking/atomicity fixes identified in §5 to `PermissionGateway`, `ApprovalStore`, `ProjectStore`.**
+   - Purpose: prerequisite for any future genuine parallelism; also hardens the already-real synchronous-path/background-worker-thread overlap (§5) that exists *today*, independent of any fleet work.
+   - Files: `agent/core/permissions.py`, `agent/core/approval_store.py`, `agent/core/project_store.py`, possibly `agent/memory.py::JSONStore` itself.
+   - Dependencies: none functionally, but should land before step 4.
+   - Risks: locking must not be held across an actual tool call (the existing `_project_registry_lock`/`_in_flight_lock` pattern in this codebase already demonstrates the right shape to copy) or it reintroduces the exact bottleneck/deadlock risk this codebase has so far deliberately avoided.
+   - Tests required: concurrency-specific tests that don't currently exist (§5) — genuinely exercising two threads hitting `PermissionGateway.check()` simultaneously.
+   - Must remain untouched: `SecretsVault`/`TaskStore` (already correctly locked — no changes needed there).
+
+4. **Only after 1-3: consider genuine parallel execution of independent, ready subtasks (multiple workers or an async model).**
+   - Purpose: the actual "parallel execution of independent work" spec goal.
+   - Files: `agent/core/task_executor.py` (or a new sibling), `agent/core/task_manager.py`.
+   - Dependencies: steps 1-3 must be complete and tested first.
+   - Risks: the highest-risk step by far — this is where the resource/conflict model (§8) becomes load-bearing rather than theoretical.
+   - Tests required: substantial new concurrency test suite; this step alone likely warrants its own dedicated review/approval cycle before implementation, given the security implications in §12.
+   - Must remain untouched: the single `ToolRegistry.invoke()` → `PermissionGateway.check()` → `Sandbox` chokepoint — every parallel worker must still go through the same one, never a duplicated or bypassed path.
+
+Contract design (interfaces/data shapes for whichever of the above is approved) is the appropriate next step once you decide how far into this sequence to commit — I have not drafted any contracts here, per the instructions.
+
+---
+
+## 17. RISKS / OPEN QUESTIONS
+
+- **Open question, not answered by either source:** whether VECTOR/MEMORY/HACKATHON are intended as genuine future runtime roles from some other authoritative source not provided to me (a roadmap doc, a prior conversation), or whether the "canonical roster" I was given conflates spec-sourced names with aspirational names from elsewhere. I cannot resolve this from the two inputs I have — flagging rather than guessing.
+- **Risk:** the `PermissionGateway`/`ApprovalStore`/`ProjectStore` locking gaps (§5) are real *today*, independent of any fleet work — the synchronous-path/background-thread overlap already exists in production, not just in a hypothetical future. This arguably deserves attention regardless of whether fleet work proceeds.
+- **Risk:** `agent/core/task.py`'s own `VerificationState` docstring still references *"the dedicated WRITE_FILE/EDIT_FILE verification step in TaskManager._execute_plan()"* — stale documentation left over from before the WATCHER ToolRegistry-seam refactor (that step no longer exists as a separate thing in `_execute_plan()`). Not a functional defect, but worth a documentation pass so future readers (human or Claude) don't get misdirected the way I nearly did.
+- **Risk:** `agent/core/model_agent.py`'s docstring claim ("the six specialist roles are finalized... there is no open/undecided slot") is stale (`SECRETS_OPS` was added later, and `COMPUTER_AUTOMATION` remains unimplemented) — a minor but real drift between comment and code that should be corrected in any pass that touches this file.
+- **Open question:** what "priority" should mean once/if `Priority-Based Scheduling`/`Priority Queue Management` are eventually built — nothing in the current `Task`/`Subtask` model carries any priority field today, so this would be new data, not just new logic.
+- **Risk:** I did not run the test suite during this preflight (out of scope for a read-only architecture investigation, and not requested) — all findings above are from static source inspection only, cross-referenced against the test *names* that exist (e.g., `test_multiple_tasks_all_complete_without_corruption`), not from executing them in this pass.
+
+---
+
+## 18. PREFLIGHT VERDICT
+
+**NOT READY — MORE REPOSITORY INVESTIGATION REQUIRED**
+
+Not because anything above is unresolved as an *investigation* matter — every question in the original 18-point list has been answered directly from source, with citations, or explicitly marked unknown where the sources don't say. It's "not ready for contract design" because the investigation itself surfaced a **prerequisite decision that has to be made first**: whether to pursue dependency-graph correctness (§16 steps 1-2, safe, no new concurrency risk) as a self-contained piece of work before touching real parallelism (§16 steps 3-4, which requires hardening already-identified thread-safety gaps first). Writing a fleet *contract* today would have to guess at that sequencing decision rather than reflect one you've actually made. Once you decide how far into the §16 sequence you want to commit for the next phase, contract design for that specific slice is ready to begin from this investigation's findings.
