@@ -1,0 +1,129 @@
+
+PS C:\Users\nukra\Lanux> git cat-file -t 2a0a393
+fatal: Not a valid object name 2a0a393
+PS C:\Users\nukra\Lanux> $h = "$env:USERPROFILE\Downloads\LANUX-STAGE4-HANDOFF.zip"
+>> $e = "$env:TEMP\LANUX-STAGE4-HANDOFF-INSPECT"
+>> Remove-Item $e -Recurse -Force -ErrorAction SilentlyContinue
+>> Expand-Archive -LiteralPath $h -DestinationPath $e -Force
+>> Get-Content "$e\HANDOFF.md"
+# LANUX Stage 4 â€” Handoff (intra-Task bounded parallel execution)
+
+> **Do not restart Stage 4 from scratch.**
+> **Do not assume the previous Claude's claims are correct â€” verify the repository.**
+> **Do not proceed to Stage 5.**
+> If anything in this file conflicts with the repository, **the repository wins.**
+
+Generated: 2026-09-30T14:33Z (git state captured at that time; no test run was active).
+
+---
+
+## 1. Project identity
+**LANUX AI** â€” a locally-run Windows desktop AI/agent system (Python/Flask backend, deterministic agent execution pipeline, security-first design).
+
+## 2. Repository
+- Local (Cosmo's machine): `C:\Users\nukra\Lanux`
+- Canonical GitHub: https://github.com/nukrax/Lanux
+- **Important caveat about the commit hashes in this package.** The previous Claude never had the real repository or `.git` history. It worked from uploaded flat ZIP exports and created a **sandbox-local tracking repo** purely for diffing (branch `master`). Hashes such as `2a0a393` / `5ea9152` are **that sandbox repo's hashes**, not necessarily your real repo's. Match by commit *message* and by content, not by hash alone. Project workflow is that the user applies/commits/pushes on the real machine.
+
+## 3. Baseline
+- **Stage 3 commit: `2a0a393`** ("Stage 3: concurrency-safety prerequisites (P1-P5), hardening only"), full hash `2a0a39377f4326e464591a14d5909f38ce5a0e1c` (sandbox).
+- Full suite at that baseline: **1241 passed, 1 skipped, 0 failed.** The one skip is the environment-only `test_proposer_evaluation.py` skip (lanux_v2 checkpoint/tokenizer not present) â€” unrelated to this work.
+- The working tree was **clean** when Stage 4 implementation began (`git status --short` empty, HEAD `2a0a393`).
+
+## 4. Locked history (do not reopen)
+| Stage | Commit (sandbox) | Result |
+|---|---|---|
+| S.8 WATCHER | `9c10769` (baseline import `e0cde2c` in sandbox) | Verification centralized in `ToolRegistry.invoke()`; `VerificationState` = NOT_ATTEMPTED/VERIFIED/FAILED/INCONCLUSIVE; gated read-back; **no `AgentRole.WATCHER`**. 1200 tests. |
+| Stage 1 + 2 | `5ea9152` | Dependency-scoped failure containment; one-time graph validation; dependency-aware**single-worker** scheduler; deterministic list-order selection. 1216 passed / 1 skipped. |
+| Stage 3 | `2a0a393` | P1 ApprovalStore+ProjectStore locks; P2/P3 PermissionGateway approval-consume / duplicate-request atomicity (`_approval_lock`); P4 per-Task `state_lock` + `_persist` under it (lock order Task â†’ TaskStore); P5 `ResourceRef(project_id, path)` + pure `resources_overlap()` (declarative only). 1241 passed / 1 skipped. |
+
+## 5. Exact Stage 4 objective
+First real **intra-Task** concurrency. Bounded, deterministic, dispatcher-owned, resource-aware, fail-closed, persistent, reversible. Required pieces: **B1** canonical Task identity, **B2** single-dispatcher ownership, **B3** ProjectMemory/LongTermKnowledge locks, bounded concurrent subtask workers, completion queue, dispatcher-owned reconciliation, resource-conflict prevention (undeclared = exclusive), deterministic dispatch order, preserved failure isolation / retry, concurrency-safe cancellation, approval pause/resume draining, worker lifecycle safety, **deterministic Stage 4 tests**, regression validation. Nothing else.
+
+## 6. Approved architecture (preserve exactly)
+```
+ONE Task -> ONE dispatcher -> bounded concurrent subtask workers
+         -> completion queue -> dispatcher-owned reconciliation
+```
+- `BackgroundTaskExecutor` stays **exactly one worker**; concurrency lives **inside `TaskManager`**.
+- **Default concurrency = 1** and must reproduce Stage 2 behavior.
+- Dispatcher = sole authority for dependency evaluation, ready selection, resource-conflict selection, claiming, completion reconciliation, dependency propagation, finalization, cancellation bookkeeping, scheduler persistence.
+- Workers execute the claimed subtask and report; they do not schedule, evaluate dependencies, finalize, claim, or change ownership.
+- `Task.state_lock` never held across specialist/tool/model/filesystem/network execution or while waiting on the completion queue. Lock order stays Task lock â†’ TaskStore lock.
+- WATCHER, `ToolRegistry`, `PermissionGateway` (beyond Stage 3), routing, specialists, `recovery.py`, `BackgroundTaskExecutor` worker count: **locked**.
+
+## 7. What is already implemented in the working tree (5 modified files, uncommitted)
+Full detail in `CHANGES.md`; the authoritative artifact is `DIFF.patch` (verified to apply cleanly to a pristine export of HEAD and reproduce the working files byte-for-byte).
+
+- **B3 â€” `agent/memory.py`:** `threading.Lock` per instance on `LongTermKnowledge` (whole readâ†’idâ†’appendâ†’persist in `add_fact`; reads return copies) and `ProjectMemory` (`note_file_touched` whole readâ†’modifyâ†’persist; reads return copies). Schema unchanged.
+- **B1 â€” `task_manager.py`:** `_tasks_lock` (leaf) + `_adopt_canonical()` (`dict.setdefault` under the lock). `get_task`, `list_tasks`, `_create_task_core` use it so one Task id â‡’ one live object.
+- **B2 â€” `task.py` + `task_manager.py`:** `Task._dispatching` (not serialized, read/written only under `state_lock`). `run_task()` is now a thin wrapper: terminal early-return â†’ claim under lock (else raise `TaskAlreadyRunningError`) â†’ `_dispatch()` â†’ release in `finally`. `task_executor.py::_run_one` catches `TaskAlreadyRunningError` (logs, does **not** force-fail the Task); `_force_failed` now takes the Task lock. `backend/api.py` sync resume returns **409** on `TaskAlreadyRunningError`.
+- **Concurrency â€” `task_manager.py`:** `TaskManager(max_concurrent_subtasks=1)` (public attribute; `_concurrency_limit()` coerces to â‰¥1). `_dispatch()` loop: settle blocked â†’ `_launch_round()` (claims atomically under lock; first-fit, deterministic list order; capacity; resource conflicts; cancel check and "in-flight AWAITING_APPROVAL" check under the lock) â†’ block on `completions.get()` with no lock held â†’ `_reconcile()`. Workers: `_start_worker()` (limit 1 â‡’ **inline on the dispatcher thread**; else non-daemon `threading.Thread` named`lanux-subtask-<id>`), `_worker()` wraps the **unchanged** `_run_subtask()` and always puts exactly one `_Completion`. `_drain()` waits for/reconciles all in-flight workers on an exception path. Worker exception â‡’ subtask `FAILED` ("internal error during subtask execution (<ExcType>)"), audit event `subtask_exception`, dependents then skip normally.
+- **Approval/cancel in `_dispatch`:** `_approval_target()` binds a resume response to the AWAITING_APPROVAL subtask whose `result["raw"]["approval_request_id"]` matches `response.request_id` (else first awaiting = Stage 2behavior). An `awaiting_approval` outcome sets `paused` â‡’ stop launching, drain, return PARTIAL. Cancellation â‡’ stop launching, drain, then if any PENDING/AWAITING remain â†’ `_skip_remaining("cancelled")` + CANCELLED; otherwise normal finalization (preserves Stage 2's "cancel too late" outcome).
+- **Resource policy â€” `task_manager.py` + `task.py`:** `_subtasks_conflict()` (fail-closed: `None` resourcesâ‡’ conflicts with everything), `_effective_resources()` (explicit `subtask.resources` win, else `_derive_resources()`), `_FILE_PATH_TASKS` (READ_FILE, WRITE_FILE, EDIT_FILE, LIST_DIRECTORY, GET_PATH_INFO â‡’ canonical relative path; `"."` â‡’ whole project), `_WHOLE_PROJECT_TASKS` (RUN_TESTS, GIT_STATUS/ADD/COMMIT/PUSH, OPEN_PATH, OPEN_APPLICATION â‡’ `path=None`), **everything else exclusive** (RESEARCH, GENERATE_TEXT, GITHUB_*, SECRETS_*, UNKNOWN). `_canonical_relative_path()` realpath-resolves against the project workspace root (from `project_store`), rejects escapes, applies `os.path.normcase`. `ResourceRef.overlaps` now does component-wise directory containment (`_path_contains`, `"."` contains all).
+
+**Verified byte-identical to Stage 3 HEAD (deliberately untouched):** `_run_subtask`, `_apply_subtask_result`,`_advance_blocked_subtasks`, `_ready_subtasks`, `_select_next_ready_subtask`, `_next_subtask_to_run`, `_validate_dependency_graph`, `_final_task_status`, `_dependencies_satisfied`, `_first_failed_dependency_error`.
+
+## 8. What remains unfinished (nothing below has been done)
+1. **The Stage 4 test file does not exist.** None of the 45+ mandatory deterministic tests (B1/B2/B3, parallelism, dependencies, resources, failure, cancellation, approval, WATCHER, persistence, exceptions/drain) have been written. Suggested file: `tests/test_stage4_intra_task_concurrency.py` (LF/CRLF: repo is CRLF; convert new files to CRLF).
+2. **No mutation/no-op-lock validation has been run** for any Stage 4 race test.
+3. **The tiered regression was not run separately** after the final code state (see `TEST_STATUS.md`): only one full-suite run, at default concurrency 1, which exercises none of the new concurrent paths.
+4. **The API 409 path and the executor's `TaskAlreadyRunningError` handling are untested.** Fixtures to reuse:`tests/test_background_api.py` (`stack` + Flask test client) and `tests/test_task_executor.py`.
+5. No commit has been made. The required final commit message is `Stage 4: bounded intra-task parallel execution` â€” **only when genuinely complete**; do not push/merge.
+
+## 9. Known failures
+- **Current working tree: none known.** The last full-suite run was green (1241 passed, 1 skipped). This only proves concurrency=1 regression safety.
+- **Intermediate failures already fixed this session (history, do not reintroduce):**
+  1. `tests/test_task_manager.py::test_task_manager_never_imports_tools_directly` and `tests/test_error_recovery.py::test_task_manager_and_controller_never_call_tool_handlers_directly` failed because an early draft did `from tools.sandbox import SandboxPolicy` inside `task_manager.py`. **TaskManager must never import `tools.*`** (architecture guard). Fixed by computing the realpath locally in `_canonical_relative_path`. Also: the literal text `from tools` must not appear anywhere in `task_manager.py`, even in comments.
+  2. `tests/test_phase_d.py::test_running_status_persisted_before_first_subtask_finishes` failed when the worker called a new `_execute_attempts` instead of `_run_subtask` (tests monkeypatch `self._run_subtask` as the execution seam; `test_phase_e.py` does too). Fixed by restoring `_run_subtask` exactly and making the worker call `self._run_subtask(...)`. **Keep `_run_subtask` as the worker's entry point.**
+
+## 10. Known architectural concerns (please review, do not silently "fix")
+- **C1 (most important): reconciliation deviates from the literal contract wording.** The contract says the dispatcher applies the result under `Task.state_lock`. In the current code the worker's unchanged `_run_subtask()` commits the subtask's terminal status/attempts/verification atomically under the Task lock (the Stage 3 P4 behavior), and `_reconcile()` only pops the in-flight entry, joins the thread, converts a worker exception into `FAILED`, and persists. Reason: existing tests hook `_run_subtask`, and the contract also says the worker wraps the existing `_run_subtask()` unchanged. Consequences: (a) a committed-DONE subtask is visible to settle/launchbefore its `_Completion` is reconciled; (b) it still counts as in-flight for capacity/conflicts until reconciled; (c) mitigations already present in `_launch_round`: cancel flag read under the lock, and no launching whileany in-flight subtask has already committed AWAITING_APPROVAL. Decide whether this is acceptable or whether a dispatcher-side commit compatible with the `_run_subtask` hook seam is required. (A first attempt that moved the commit into the dispatcher broke the hook tests and was reverted.)
+- **C2: behavior change at limit 1.** Exceptions raised by `_run_subtask` are now contained as subtask `FAILED` rather than escaping `run_task()` (and leaving the subtask RUNNING until the executor's safety net force-failed the whole Task). No existing test depended on the old behavior.
+- **C3: path canonicalization is a local re-implementation.** Contract says "use existing Sandbox canonical path resolution where appropriate"; importing `tools.*` is forbidden by the architecture guard, `ToolRegistry` exposes no sandbox and is locked. Enforcement still lives only in the Sandbox at execution time; derivation only decides *conflict identity* and any doubt â‡’ exclusive.
+- **C4: Windows case/realpath behavior is UNKNOWN** â€” this sandbox is Linux. `os.path.normcase` is relied on; a Windows run (or a test that monkeypatches `os.path.normcase`) is needed. Symlink/junction behavior on Windows is unverified.
+- **C5: tasks on the global registry** (no project) have no known workspace root â‡’ only plain relative paths, textual normalization, **no symlink resolution**; absolute or `..` paths â‡’ exclusive.
+- **C6:** `_claim_subtask` does not persist (matches Stage 2); RUNNING is visible on disk only via later persists. Crash-orphan recovery is out of scope (no restart recovery exists anywhere).
+- **C7:** `_reconcile` does `in_flight.pop(record.subtask.id)` with no guard for an unknown id (cannot happen today).
+- **C8:** `completions.get()` has no timeout by design â€” a hung tool blocks its dispatcher (threads are never force-killed).
+- **C9:** `_note_project_memory` is still called inside `_run_subtask` (worker thread); safe now because of B3locks.
+- **C10:** Resource classification choices to confirm: browser/computer-control task types do not exist as `TaskType` members today; `OPEN_PATH`/`OPEN_APPLICATION` are treated as whole-project; `RESEARCH`, `GENERATE_TEXT`, `GITHUB_*`, `SECRETS_*`, `UNKNOWN` are exclusive (stricter than "whole project" â€” safe, but confirm intent).
+- **C11:** The approval-resume binding with **multiple** simultaneously AWAITING_APPROVAL subtasks (only the matching one is resumed; others stay awaiting â‡’ final PARTIAL) is implemented but completely untested.
+- **C12:** Project documents (ways of working) say never commit/push unless told; this stage's commit instruction is explicit and applies only when complete.
+
+## 11. Tests already run (exact; see TEST_STATUS.md)
+- After `task.py` edits: `test_stage3_concurrency_prerequisites.py` â€” 25 passed.
+- Targeted run after first dispatcher draft: **2 failed, 100 passed** (architecture guards, fixed).
+- Same four files after the fix: 81 passed.
+- Full suite `-x`: **1 failed, 625 passed** (stopped at `test_phase_d`, fixed).
+- Final full suite: **1241 passed, 1 skipped, 0 failed** (~131 s) â€” the only complete run of the final code.
+- No Stage 4 focused tests exist; no mutation checks; no separate tier runs since the last edit.
+
+## 12. Current git state (captured 2026-09-30T14:33Z)
+```
+branch: master (sandbox-local)        HEAD: 2a0a39377f4326e464591a14d5909f38ce5a0e1c
+ M agent/core/task.py
+ M agent/core/task_executor.py
+ M agent/core/task_manager.py
+ M agent/memory.py
+ M backend/api.py
+(no untracked, deleted, or renamed files; no stash; no other branches)
+ 5 files changed, 504 insertions(+), 85 deletions(-)
+2a0a393 Stage 3: concurrency-safety prerequisites (P1-P5), hardening only
+5ea9152 Stage 1+2: dependency-scoped failure containment and dependency-graph scheduling
+e0cde2c checkpoint 9c10769 baseline (imported, orchestration work)
+```
+`MODEL_PLANNING.md` is clean: running `tests/test_model_planner.py` rewrites that tracked file as a harmless side effect â€” **revert it after any full-suite run** (`git checkout -- MODEL_PLANNING.md`) and never commit it.
+
+Intentionally **not** changed: `agent/core/tool_registry.py` (WATCHER), `permissions.py`, `approval_store.py`,`project_store.py`, `task_store.py`, `router.py`, `model_registry.py`, `model_agent.py`, specialists, `recovery.py`, `controller.py`, `audit.py`, `secrets_store.py`, `BackgroundTaskExecutor` worker count/queue.
+
+## 13. Exact next safe action
+1. Verify the real repo matches this state (apply `DIFF.patch` onto a clean Stage 3 checkout, or confirm the five files are identical to `files/modified/`). Do **not** reset or rewrite.
+2. Read the five modified files and the diff against the Stage 4 contract; report findings; decide C1 with theuser if needed.
+3. Write `tests/test_stage4_intra_task_concurrency.py` (deterministic: Events/Barriers/queues, no sleeps as proofs). Reuse Stage 3's hook technique (park a thread inside the vulnerable window). Use a `TaskManager(registry, audit_log=..., task_store=..., max_concurrent_subtasks=N)` with `tm.executor = <probe>` for scheduling tests and the real registry for WATCHER/approval tests. Prove simultaneity with a `Barrier(n)` inside the probe (a sequential scheduler would time out).
+4. Mutation-check the race tests (temporarily no-op: `_tasks_lock`/`_adopt_canonical` â†’ plain assignment, `_dispatching` claim, `LongTermKnowledge._lock`, `ProjectMemory._lock`, resource conflict â†’ always False); discard the mutation artifacts.
+5. Run the tiers (focused, Stage 3, Stage 1+2, WATCHER, S.0â€“S.8 17-file subset, full), revert `MODEL_PLANNING.md`, check `git diff --stat`/scope, then **one** commit `Stage 4: bounded intra-task parallel execution`. No push/merge. Stop after the final report.
+
+## 14. Project boundary
+LANUX is completely separate from the NUKRAX WEB project. Nothing from it is in this package or may be added to LANUX.
+PS C:\Users\nukra\Lanux> 
