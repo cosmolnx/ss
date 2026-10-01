@@ -1,129 +1,778 @@
 
-PS C:\Users\nukra\Lanux> git cat-file -t 2a0a393
-fatal: Not a valid object name 2a0a393
-PS C:\Users\nukra\Lanux> $h = "$env:USERPROFILE\Downloads\LANUX-STAGE4-HANDOFF.zip"
->> $e = "$env:TEMP\LANUX-STAGE4-HANDOFF-INSPECT"
->> Remove-Item $e -Recurse -Force -ErrorAction SilentlyContinue
->> Expand-Archive -LiteralPath $h -DestinationPath $e -Force
->> Get-Content "$e\HANDOFF.md"
-# LANUX Stage 4 â€” Handoff (intra-Task bounded parallel execution)
+PS C:\Users\nukra\Lanux> $repo = "C:\Users\nukra\Lanux"
+>> $s = "$env:TEMP\LANUX-STAGE3-RECOVERY-CHECK"
+>> 
+>> $files = @(
+>>     "agent\core\task.py",
+>>     "agent\core\task_executor.py",
+>>     "agent\core\task_manager.py",
+>>     "agent\memory.py",
+>>     "backend\api.py"
+>> )
+>> 
+>> foreach ($rel in $files) {
+>>     $stage3 = Join-Path $s $rel
+>>     $s8     = Join-Path $repo $rel
+>> 
+>>     $h3 = (Get-FileHash $stage3 -Algorithm SHA256).Hash
+>>     $h8 = (Get-FileHash $s8     -Algorithm SHA256).Hash
+>> 
+>>     [PSCustomObject]@{
+>>         File       = $rel
+>>         Stage3Hash = $h3
+>>         S8Hash     = $h8
+>>         Identical  = ($h3 -eq $h8)
+>>     }
+>> } | Format-Table -AutoSize
+At line:25 char:3
++ } | Format-Table -AutoSize
++   ~
+An empty pipe element is not allowed.
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : EmptyPipeElement
+ 
+PS C:\Users\nukra\Lanux> $repo = "C:\Users\nukra\Lanux"
+>> $s = "$env:TEMP\LANUX-STAGE3-RECOVERY-CHECK"
+>> 
+>> $files = @(
+>>     "agent\core\task.py",
+>>     "agent\core\task_executor.py",
+>>     "agent\core\task_manager.py",
+>>     "agent\memory.py",
+>>     "backend\api.py"
+>> )
+>> 
+>> foreach ($rel in $files) {
+>>     Write-Host "`n===== $rel =====" -ForegroundColor Cyan
+>> 
+>>     git --no-pager diff --no-index -- `
+>>         (Join-Path $s $rel) `
+>>         (Join-Path $repo $rel)
+>> 
+>>     $rc = $LASTEXITCODE
+>> 
+>>     if ($rc -eq 0) {
+>>         Write-Host "IDENTICAL"
+>>     }
+>>     elseif ($rc -eq 1) {
+>>         Write-Host "DIFFERENT"
+>>     }
+>>     else {
+>>         Write-Host "DIFF ERROR: $rc" -ForegroundColor Red
+>>     }
+>> }
 
-> **Do not restart Stage 4 from scratch.**
-> **Do not assume the previous Claude's claims are correct â€” verify the repository.**
-> **Do not proceed to Stage 5.**
-> If anything in this file conflicts with the repository, **the repository wins.**
+===== agent\core\task.py =====
+warning: in the working copy of 'C:\Users\nukra\Lanux\agent\core\task.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/C:\\Users\\nukra\\AppData\\Local\\Temp\\LANUX-STAGE3-RECOVERY-CHECK\\agent\\core\\task.py" "b/C:\\Users\\nukra\\Lanux\\agent\\core\\task.py"
+index c2137fc..fd4ed01 100644
+--- "a/C:\\Users\\nukra\\AppData\\Local\\Temp\\LANUX-STAGE3-RECOVERY-CHECK\\agent\\core\\task.py"
++++ "b/C:\\Users\\nukra\\Lanux\\agent\\core\\task.py"
+@@ -14,8 +14,6 @@ is reused rather than rewritten.
+ 
+ from __future__ import annotations
+ 
+-import posixpath
+-import threading
+ import time
+ import uuid
+ from dataclasses import dataclass, field
+@@ -141,61 +139,6 @@ def _safe_verification_state(value) -> VerificationState:
+         return VerificationState.NOT_ATTEMPTED
+ 
+ 
+-@dataclass(frozen=True)
+-class ResourceRef:
+-    """
+-    Stage 3 (P5) — a purely DECLARATIVE statement of what a Subtask touches.
+-    It is data only: nothing in the current scheduler reads it, and it is
+-    not a lock, a lease, or a claim.
+-
+-    `depends_on` and resource declarations are two SEPARATE dimensions and
+-    must never be merged:
+-      * `Subtask.depends_on` = logical ORDERING ("B needs A's output, so B
+-        runs after A").
+-      * `Subtask.resources`  = physical CONFLICT ("A and B both touch
+-        main.py, so they must not run at the same time" — even when
+-        neither is logically about the other).
+-
+-    Fields:
+-      project_id -- the project scope this resource lives in (the same id
+-                    space as ProjectStore / Task.project_id). None means
+-                    "no project scope declared" and compares equal only
+-                    to another None.
+-      path       -- a resource identity WITHIN that project, normally a
+-                    workspace-relative file/directory path. None means
+-                    "the project as a whole" (e.g. a git operation on the
+-                    working tree), which overlaps every path in the same
+-                    project.
+-
+-    Paths are normalized for separators only (backslash -> slash,
+-    redundant "./" and "//" collapsed via posixpath.normpath). Matching is
+-    otherwise exact and case-sensitive; directory-containment and
+-    case-insensitive-filesystem handling are deliberately NOT modelled yet.
+-    """
+-    project_id: str | None = None
+-    path: str | None = None
+-
+-    def __post_init__(self):
+-        if self.path is not None:
+-            normalized = posixpath.normpath(str(self.path).replace("\\", "/"))
+-            object.__setattr__(self, "path", normalized)
+-
+-    def overlaps(self, other: "ResourceRef") -> bool:
+-        """Pure. True iff the two refs could refer to the same resource."""
+-        if self.project_id != other.project_id:
+-            return False
+-        if self.path is None or other.path is None:
+-            return True  # whole-project scope overlaps anything in that project
+-        return self.path == other.path
+-
+-    def to_dict(self) -> dict:
+-        return {"project_id": self.project_id, "path": self.path}
+-
+-    @staticmethod
+-    def from_dict(data: dict) -> "ResourceRef":
+-        return ResourceRef(project_id=data.get("project_id"), path=data.get("path"))
+-
+-
+ @dataclass
+ class Subtask:
+     id: str
+@@ -214,29 +157,11 @@ class Subtask:
+     # dedicated WRITE_FILE/EDIT_FILE verification step in
+     # TaskManager._execute_plan() — never by a tool handler itself.
+     verification_state: VerificationState = VerificationState.NOT_ATTEMPTED
+-    # Stage 3 (P5): optional, empty by default, never consulted by the
+-    # current scheduler. See ResourceRef.
+-    resources: list[ResourceRef] = field(default_factory=list)
+ 
+     def touch(self) -> None:
+         self.updated_at = time.time()
+ 
+ 
+-def resources_overlap(a: "Subtask", b: "Subtask") -> bool:
+-    """
+-    Stage 3 (P5) — pure, side-effect-free: True iff any resource declared by
+-    `a` overlaps any resource declared by `b`. It reads ONLY `.resources`;
+-    it never looks at `depends_on`, statuses, or anything else, and it
+-    mutates nothing.
+-
+-    A subtask that declares no resources yields False. That means "no
+-    known overlap", NOT "proven safe to run concurrently" — an undeclared
+-    subtask is simply unknown, and what a future scheduler should do about
+-    unknown is a scheduling-policy decision deliberately not made here.
+-    """
+-    return any(ra.overlaps(rb) for ra in a.resources for rb in b.resources)
+-
+-
+ @dataclass
+ class Task:
+     id: str
+@@ -260,25 +185,10 @@ class Task:
+     # `trust_origin` property immediately below for the actual
+     # immutability enforcement (no setter).
+     _trust_origin: str = TrustOrigin.LOCAL_UNAUTHENTICATED
+-    # Stage 3 (P4): one re-entrant lock PER Task object. It guards the
+-    # multi-field state transitions of this Task's subtasks and the
+-    # serialization/persistence of this Task, so a snapshot can never see
+-    # (for example) a subtask's new status paired with its stale result.
+-    # Not a dataclass init argument, not part of equality/repr, and never
+-    # serialized. It is scoped to bookkeeping only and must never be held
+-    # across a specialist or tool call. Not global: two different Tasks
+-    # never contend on it.
+-    _state_lock: threading.RLock = field(
+-        default_factory=threading.RLock, init=False, repr=False, compare=False
+-    )
+ 
+     def touch(self) -> None:
+         self.updated_at = time.time()
+ 
+-    @property
+-    def state_lock(self):
+-        return self._state_lock
+-
+     @property
+     def trust_origin(self) -> str:
+         return self._trust_origin
+@@ -292,11 +202,6 @@ class Task:
+     # specific gap (trust_origin reassignment), not a broader redesign.
+ 
+     def to_dict(self) -> dict:
+-        # Stage 3 (P4): a consistent snapshot — see _state_lock.
+-        with self._state_lock:
+-            return self._to_dict_unlocked()
+-
+-    def _to_dict_unlocked(self) -> dict:
+         return {
+             "id": self.id,
+             "message": self.message,
+@@ -323,10 +228,6 @@ class Task:
+                     "created_at": st.created_at,
+                     "updated_at": st.updated_at,
+                     "verification_state": st.verification_state.value,
+-                    # Stage 3 (P5): emitted only when declared, so the
+-                    # persisted shape of every existing (resource-free)
+-                    # subtask is byte-for-byte what it was before.
+-                    **({"resources": [r.to_dict() for r in st.resources]} if st.resources else {}),
+                 }
+                 for st in self.subtasks
+             ],
+@@ -379,7 +280,6 @@ class Task:
+                 # to NOT_ATTEMPTED — the honest fact for old data, never
+                 # inferred as VERIFIED/FAILED from absence.
+                 verification_state=_safe_verification_state(st_data.get("verification_state")),
+-                resources=[ResourceRef.from_dict(r) for r in st_data.get("resources", [])],
+             )
+             task.subtasks.append(subtask)
+         return task
+@@ -415,12 +315,5 @@ def new_task(
+     )
+ 
+ 
+-def new_subtask(
+-    plan: Plan,
+-    depends_on: list[str] | None = None,
+-    resources: list[ResourceRef] | None = None,
+-) -> Subtask:
+-    return Subtask(
+-        id=_new_id("subtask"), plan=plan, depends_on=depends_on or [],
+-        resources=list(resources) if resources else [],
+-    )
++def new_subtask(plan: Plan, depends_on: list[str] | None = None) -> Subtask:
++    return Subtask(id=_new_id("subtask"), plan=plan, depends_on=depends_on or [])
+DIFFERENT
 
-Generated: 2026-09-30T14:33Z (git state captured at that time; no test run was active).
+===== agent\core\task_executor.py =====
+warning: in the working copy of 'C:\Users\nukra\Lanux\agent\core\task_executor.py', LF will be replaced by CRLF the next time Git touches it
+IDENTICAL
 
----
+===== agent\core\task_manager.py =====
+warning: in the working copy of 'C:\Users\nukra\Lanux\agent\core\task_manager.py', LF will be replaced by CRLFthe next time Git touches it
+diff --git "a/C:\\Users\\nukra\\AppData\\Local\\Temp\\LANUX-STAGE3-RECOVERY-CHECK\\agent\\core\\task_manager.py" "b/C:\\Users\\nukra\\Lanux\\agent\\core\\task_manager.py"
+index 340e7ef..12c0e98 100644
+--- "a/C:\\Users\\nukra\\AppData\\Local\\Temp\\LANUX-STAGE3-RECOVERY-CHECK\\agent\\core\\task_manager.py"
++++ "b/C:\\Users\\nukra\\Lanux\\agent\\core\\task_manager.py"
+@@ -135,16 +135,7 @@ class TaskManager:
+ 
+     def _persist(self, task: Task) -> None:
+         if self.task_store is not None:
+-            # Stage 3 (P4): snapshot + write happen under this Task's own
+-            # lock, so (a) the serialized snapshot is internally
+-            # consistent, and (b) two persists of the same Task cannot
+-            # land out of order (an older snapshot overwriting a newer
+-            # one). Held only for serialization + the store write — never
+-            # across a specialist or tool call. Lock order is always
+-            # task.state_lock -> TaskStore's lock; TaskStore never takes a
+-            # Task lock, so there is no cycle.
+-            with task.state_lock:
+-                self.task_store.save_task(task)
++            self.task_store.save_task(task)
+ 
+     def _record(self, action: str, task: Task, subtask: Subtask | None = None, detail: str = "") -> None:
+         if self.audit_log is not None:
+@@ -371,9 +362,8 @@ class TaskManager:
+         task = self.get_task(task_id)
+         if task is None or task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+             return False
+-        with task.state_lock:
+-            task.cancel_requested = True
+-            task.touch()
++        task.cancel_requested = True
++        task.touch()
+         self._persist(task)
+         # Phase D: a task cancelled while a subtask is AWAITING_APPROVAL
+         # must not leave a stale, still-actionable ApprovalRequest behind —
+@@ -390,102 +380,69 @@ class TaskManager:
+ 
+     def run_task(self, task: Task, approval_response: ApprovalResponse | None = None) -> Task:
+         """
+-        Runs subtasks until completion, failure, cancellation, or a subtask
+-        needs an approval that hasn't been granted yet (in which case the
+-        task is left in PARTIAL status and this method returns — callers
+-        resume by calling run_task again with the resulting
++        Runs subtasks in order until completion, failure, cancellation, or a
++        subtask needs an approval that hasn't been granted yet (in which
++        case the task is left in PARTIAL status and this method returns —
++        callers resume by calling run_task again with the resulting
+         ApprovalResponse once the user has decided).
+-
+-        STAGE 1/2 (dependency-scoped failure containment + dependency-graph
+-        scheduling, single-worker): subtasks are no longer executed in
+-        strict list order. Each iteration re-evaluates the whole graph,
+-        settles every dependency-blocked subtask to a fixed point
+-        (_advance_blocked_subtasks), then selects exactly one subtask that
+-        is genuinely ready to run right now (_next_subtask_to_run) —
+-        deterministically, using task.subtasks' existing list order as the
+-        tiebreak among several simultaneously-ready subtasks. This is still
+-        fully single-threaded: one subtask executes, completely, before the
+-        next is even selected. A permanently failed subtask no longer
+-        blanket-skips the rest of the task — only its transitive dependents
+-        become SKIPPED (via the existing _dependencies_satisfied /
+-        _first_failed_dependency_error machinery, unchanged); unrelated
+-        branches keep executing normally. The final TaskStatus is decided
+-        only once no subtask can make further progress (see
+-        _final_task_status) — never the instant a single subtask fails.
+-
+-        The graph is validated once, up front (_validate_dependency_graph)
+-        — a malformed graph (an unknown dependency id, a self-dependency,
+-        or a cycle) fails the task immediately, before any subtask ever
+-        reaches RUNNING, rather than being discovered as an inexplicably
+-        stuck scheduler loop.
+         """
+         if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+             return task
+ 
+-        with task.state_lock:
+-            task.status = TaskStatus.RUNNING
+-            task.touch()
++        task.status = TaskStatus.RUNNING
++        task.touch()
+         # Phase D: persisted immediately (not just after the first subtask
+         # finishes, as before) so a crash mid-first-subtask is visible on
+         # restart as "was running", not indistinguishable from "never
+         # started". Everything else about this method is unchanged.
+         self._persist(task)
+ 
+-        validation_error = self._validate_dependency_graph(task)
+-        if validation_error is not None:
+-            with task.state_lock:
+-                task.status = TaskStatus.FAILED
+-                task.final_response = validation_error
+-                task.touch()
+-            self._record("invalid_dependency_graph", task, detail=validation_error)
+-            self._persist(task)
+-            return task
++        for subtask in task.subtasks:
++            if subtask.status in (SubtaskStatus.DONE, SubtaskStatus.SKIPPED):
++                continue
+ 
+-        while True:
+             if task.cancel_requested:
+-                with task.state_lock:
+-                    self._skip_remaining(task, reason="cancelled")
+-                    task.status = TaskStatus.CANCELLED
+-                    task.touch()
++                self._skip_remaining(task, reason="cancelled")
++                task.status = TaskStatus.CANCELLED
++                task.touch()
+                 self._record("task_cancelled", task)
+                 self._persist(task)
+                 return task
+ 
+-            # Stage 3 (P4): call-site wrapper only — the scheduler method
+-            # itself is unchanged; it mutates several subtasks' fields, so
+-            # the whole settle-to-fixed-point pass is one consistent unit.
+-            with task.state_lock:
+-                self._advance_blocked_subtasks(task)
+-
+-            subtask = self._next_subtask_to_run(task)
+-            if subtask is None:
+-                break
++            if not self._dependencies_satisfied(task, subtask):
++                failed_dep_error = self._first_failed_dependency_error(task, subtask)
++                subtask.status = SubtaskStatus.SKIPPED
++                subtask.error = (
++                    f"dependency not completed: {failed_dep_error}" if failed_dep_error
++                    else "dependency not completed"
++                )
++                subtask.touch()
++                self._record("skipped_dependency", task, subtask, detail=subtask.error)
++                self._persist(task)
++                continue
+ 
+             outcome = self._run_subtask(task, subtask, approval_response)
+             approval_response = None  # a supplied response is consumed once
+             self._persist(task)
+ 
+             if outcome == "awaiting_approval":
+-                with task.state_lock:
+-                    task.status = TaskStatus.PARTIAL
+-                    task.touch()
++                task.status = TaskStatus.PARTIAL
++                task.touch()
+                 self._persist(task)
+                 return task
+-            # outcome == "failed": the subtask itself is already FAILED (set
+-            # inside _run_subtask) — no task-wide short-circuit here. The
+-            # next iteration's _advance_blocked_subtasks() call will SKIP
+-            # this subtask's dependents; any unrelated ready subtask is
+-            # unaffected and will still be selected normally.
+-            # outcome == "done": nothing special — loop continues.
+-
+-        with task.state_lock:
+-            task.status = self._final_task_status(task)
+-            task.final_response = self._summarize(task)
+-            task.touch()
+-        self._record(
+-            "task_completed" if task.status == TaskStatus.COMPLETED else "task_failed",
+-            task,
+-        )
++            if outcome == "failed":
++                task.status = TaskStatus.FAILED
++                self._skip_remaining(task, reason=f"a prior subtask failed: {subtask.error}")
++                task.touch()
++                self._record("task_failed", task, subtask, detail=subtask.error or "")
++                self._persist(task)
++                return task
++            # outcome == "done" -> continue to next subtask
++
++        task.status = TaskStatus.COMPLETED
++        task.final_response = self._summarize(task)
++        task.touch()
++        self._record("task_completed", task)
+         self._persist(task)
+         return task
+ 
+@@ -503,166 +460,6 @@ class TaskManager:
+         by_id = {st.id: st for st in task.subtasks}
+         return all(by_id.get(dep_id) and by_id[dep_id].status == SubtaskStatus.DONE for dep_id in subtask.depends_on)
+ 
+-    def _has_blocking_dependency(self, task: Task, subtask: Subtask) -> bool:
+-        """
+-        True iff `subtask` depends (directly) on something that can NEVER
+-        become DONE — i.e. a dependency that is FAILED or SKIPPED. This is
+-        deliberately narrower than `not _dependencies_satisfied(...)`: a
+-        dependency that is merely PENDING/RUNNING/AWAITING_APPROVAL is
+-        "not yet satisfied" but might still succeed later, so it must NOT
+-        cause `subtask` to be skipped — only a dependency that is
+-        permanently terminal-and-not-DONE should. A dependency id with no
+-        matching subtask (should never occur once
+-        _validate_dependency_graph has passed) is treated defensively as
+-        blocking, so a corrupted/hand-built Task can't produce an infinite
+-        scheduling loop.
+-        """
+-        by_id = {st.id: st for st in task.subtasks}
+-        for dep_id in subtask.depends_on:
+-            dep = by_id.get(dep_id)
+-            if dep is None or dep.status in (SubtaskStatus.FAILED, SubtaskStatus.SKIPPED):
+-                return True
+-        return False
+-
+-    def _advance_blocked_subtasks(self, task: Task) -> None:
+-        """
+-        STAGE 1: settles every dependency-blocked subtask to a fixed point.
+-        A PENDING subtask whose dependencies are not all satisfied AND
+-        which has at least one permanently-terminal-and-not-DONE dependency
+-        (see _has_blocking_dependency) is marked SKIPPED, with the exact
+-        same error format and audit event ("skipped_dependency") the
+-        pre-Stage-1 code already used for this. Runs in a loop until one
+-        full pass makes no further change, so a multi-hop chain (A FAILED
+-        -> C SKIPPED -> E SKIPPED) is fully settled in one call, not one
+-        hop per scheduler iteration.
+-        """
+-        while True:
+-            changed = False
+-            for subtask in task.subtasks:
+-                if subtask.status != SubtaskStatus.PENDING:
+-                    continue
+-                if self._dependencies_satisfied(task, subtask):
+-                    continue
+-                if not self._has_blocking_dependency(task, subtask):
+-                    continue  # still genuinely waiting, not yet blocked
+-                failed_dep_error = self._first_failed_dependency_error(task, subtask)
+-                subtask.status = SubtaskStatus.SKIPPED
+-                subtask.error = (
+-                    f"dependency not completed: {failed_dep_error}" if failed_dep_error
+-                    else "dependency not completed"
+-                )
+-                subtask.touch()
+-                self._record("skipped_dependency", task, subtask, detail=subtask.error)
+-                changed = True
+-            if not changed:
+-                return
+-
+-    def _ready_subtasks(self, task: Task) -> list[Subtask]:
+-        """
+-        STAGE 2: every PENDING subtask whose dependencies are all DONE,
+-        in task.subtasks list order (the existing, already-stable ordering
+-        the Planner emitted them in). Does not include AWAITING_APPROVAL
+-        subtasks — those are handled separately, with precedence, by
+-        _next_subtask_to_run, so a resumed run_task() call's
+-        approval_response always reaches the specific subtask it was
+-        issued for rather than being consumed by an unrelated newly-ready
+-        subtask.
+-        """
+-        return [
+-            st for st in task.subtasks
+-            if st.status == SubtaskStatus.PENDING and self._dependencies_satisfied(task, st)
+-        ]
+-
+-    @staticmethod
+-    def _select_next_ready_subtask(ready: list[Subtask]) -> Subtask | None:
+-        """Deterministic selection: the earliest subtask in `ready`, which
+-        is already in task.subtasks list order. No priority/weighting of
+-        any kind — a plain, stable "first in existing order" rule."""
+-        return ready[0] if ready else None
+-
+-    def _next_subtask_to_run(self, task: Task) -> Subtask | None:
+-        """
+-        Combines the ready-set with the existing AWAITING_APPROVAL
+-        semantics: if a subtask is currently AWAITING_APPROVAL, it always
+-        takes precedence over anything in the ready set. This preserves
+-        pre-Stage-1/2 behavior exactly rather than introducing a new
+-        priority policy — run_task() already returns immediately the
+-        instant any subtask reaches "awaiting_approval" (see the main
+-        loop), so at most one subtask can ever be AWAITING_APPROVAL when
+-        this runs; a caller resuming with a fresh approval_response is
+-        always resuming that one specific subtask, never an unrelated
+-        newly-ready one that happened to sort earlier.
+-        """
+-        for subtask in task.subtasks:
+-            if subtask.status == SubtaskStatus.AWAITING_APPROVAL:
+-                return subtask
+-        return self._select_next_ready_subtask(self._ready_subtasks(task))
+-
+-    def _final_task_status(self, task: Task) -> TaskStatus:
+-        """
+-        Called only once no subtask can make further progress (the ready
+-        set is empty and no subtask is AWAITING_APPROVAL — that case
+-        returns earlier, unchanged, from run_task() itself). FAILED if any
+-        subtask genuinely FAILED, regardless of how many independent
+-        branches succeeded — this preserves the existing meaning of
+-        TaskStatus.FAILED ("the task did not fully accomplish what was
+-        asked") rather than introducing a new "mixed success" terminal
+-        status. COMPLETED otherwise. No new TaskStatus values.
+-        """
+-        if any(st.status == SubtaskStatus.FAILED for st in task.subtasks):
+-            return TaskStatus.FAILED
+-        return TaskStatus.COMPLETED
+-
+-    def _validate_dependency_graph(self, task: Task) -> str | None:
+-        """
+-        STAGE 2: one-time, up-front validation — called once at the start
+-        of run_task(), before any subtask executes. Returns None if the
+-        graph is well-formed, otherwise a clear, deterministic error
+-        string naming the specific problem. Duplicate dependency ids are
+-        explicitly allowed (harmless — checked redundantly, changes
+-        nothing). This is plain, small, dependency-free code — no graph
+-        library, no new graph subsystem — appropriate for the current
+-        graph sizes (a handful of subtasks per task).
+-        """
+-        by_id = {st.id: st for st in task.subtasks}
+-
+-        for subtask in task.subtasks:
+-            for dep_id in subtask.depends_on:
+-                if dep_id == subtask.id:
+-                    return f"invalid dependency graph: subtask {subtask.id} depends on itself"
+-                if dep_id not in by_id:
+-                    return (
+-                        f"invalid dependency graph: subtask {subtask.id} depends on "
+-                        f"unknown subtask id {dep_id!r}"
+-                    )
+-
+-        # Cycle detection via plain DFS with a 3-colour visited set —
+-        # graphs here are small enough that this needs no library and no
+-        # incremental/cached state.
+-        WHITE, GRAY, BLACK = 0, 1, 2
+-        color = {st.id: WHITE for st in task.subtasks}
+-
+-        def visit(node_id: str, path: list[str]) -> str | None:
+-            color[node_id] = GRAY
+-            for dep_id in by_id[node_id].depends_on:
+-                if color[dep_id] == GRAY:
+-                    cycle = " -> ".join(path + [dep_id])
+-                    return f"invalid dependency graph: cycle detected: {cycle}"
+-                if color[dep_id] == WHITE:
+-                    result = visit(dep_id, path + [dep_id])
+-                    if result is not None:
+-                        return result
+-            color[node_id] = BLACK
+-            return None
+-
+-        for subtask in task.subtasks:
+-            if color[subtask.id] == WHITE:
+-                result = visit(subtask.id, [subtask.id])
+-                if result is not None:
+-                    return result
+-
+-        return None
+-
+     def _skip_remaining(self, task: Task, reason: str) -> None:
+         for st in task.subtasks:
+             if st.status in (SubtaskStatus.PENDING, SubtaskStatus.AWAITING_APPROVAL):
+@@ -722,9 +519,8 @@ class TaskManager:
+             return registry
+ 
+     def _run_subtask(self, task: Task, subtask: Subtask, approval_response: ApprovalResponse | None) -> str:
+-        with task.state_lock:
+-            subtask.status = SubtaskStatus.RUNNING
+-            subtask.touch()
++        subtask.status = SubtaskStatus.RUNNING
++        subtask.touch()
+         registry = self._get_tool_registry_for_task(task)
+         ctx = ExecutionContext(
+             task_id=task.id, subtask_id=subtask.id, tool_registry=registry, actor=self.actor,
+@@ -736,103 +532,77 @@ class TaskManager:
+             trust_origin=task.trust_origin,
+         )
+ 
+-        # The specialist/tool call itself runs OUTSIDE any Task lock
+-        # (Stage 3, P4): the lock covers only the bookkeeping either side
+-        # of it, never the execution.
+         if self.executor is not None:
+             result = self.executor(task, subtask, ctx, approval_response)
+         else:
+             result = self._execute_plan(subtask.plan, ctx, approval_response)
++        subtask.attempts += 1
++        # Phase S.8: captured once, before any branch below, from
++        # whatever _execute_plan()/self.executor() actually returned —
++        # NOT_ATTEMPTED by default (covers denied/pending/no-evaluator
++        # cases naturally, since none of those ever produce anything
++        # else), VERIFIED/FAILED/INCONCLUSIVE only when a deterministic
++        # verifier actually ran. Safe fallback for any executor that
++        # predates S.8 and doesn't return this key at all.
++        subtask.verification_state = _safe_verification_state(result.get("verification_state"))
++
++        if result.get("denied") and result.get("denial_reason") == "approval_required":
++            subtask.status = SubtaskStatus.AWAITING_APPROVAL
++            subtask.result = result
++            subtask.touch()
++            return "awaiting_approval"
+ 
+-        outcome = self._apply_subtask_result(task, subtask, result, approval_response)
++        if result.get("denied"):
++            # Explicitly denied (not merely pending) — terminal, no silent retry.
++            subtask.status = SubtaskStatus.FAILED
++            subtask.error = result.get("error") or "permission denied"
++            subtask.result = result
++            subtask.touch()
++            return "failed"
+ 
+-        if outcome == "retry":
++        if result.get("success"):
++            subtask.status = SubtaskStatus.DONE
++            subtask.result = result
++            subtask.error = None
++            subtask.touch()
++            self._note_project_memory(task, subtask)
++            return "done"
++
++        # A real execution failure (tool error, sandbox violation, evaluator
++        # failure). Only retried if agent/core/recovery.py::is_retryable()
++        # says the operation is safe to blindly repeat — e.g. EDIT_FILE is
++        # deliberately excluded (see recovery.py's docstring) — up to
++        # max_retries, then give up.
++        #
++        # `approval_response is None` is a deliberate, additional gate: if
++        # THIS attempt was authorized by an explicit approval_response (a
++        # ONCE-scoped approval just consumed to make this exact execution
++        # happen), a genuine execution failure must NOT silently mint a
++        # brand-new ApprovalRequest and loop back to AWAITING_APPROVAL — the
++        # caller explicitly approved one execution, got a real failure, and
++        # should see that failure, not an unrequested new permission prompt.
++        # This does not affect SAFE/LOW-risk retries (approval_response is
++        # always None for those — they never require one) or retries
++        # covered by a standing SESSION/WORKSPACE_TIMED grant (those also
++        # reach this point with approval_response=None, since the grant
++        # auto-approves inside PermissionGateway.check() without needing an
++        # explicit response) — both keep retrying exactly as before.
++        if (
++            subtask.attempts <= subtask.max_retries
++            and is_retryable(subtask.plan.task_type)
++            and approval_response is None
++        ):
+             self._record(
+                 "retry", task, subtask,
+                 detail=f"attempt {subtask.attempts} of {subtask.max_retries}; error={result.get('error')}",
+             )
+             return self._run_subtask(task, subtask, None)
+-        if outcome == "done":
+-            self._note_project_memory(task, subtask)
+-        return outcome
+ 
+-    def _apply_subtask_result(
+-        self, task: Task, subtask: Subtask, result: dict, approval_response: ApprovalResponse | None,
+-    ) -> str:
+-        """
+-        Stage 3 (P4): the state-transition half of the former _run_subtask
+-        body, unchanged in logic, now one critical section under the
+-        Task's lock so attempts / verification_state / status / result /
+-        error move together. Returns "awaiting_approval", "failed",
+-        "done", or "retry" (the caller performs the retry OUTSIDE the
+-        lock). Contains no tool execution.
+-        """
+-        with task.state_lock:
+-            subtask.attempts += 1
+-            # Phase S.8: captured once, before any branch below, from
+-            # whatever _execute_plan()/self.executor() actually returned —
+-            # NOT_ATTEMPTED by default (covers denied/pending/no-evaluator
+-            # cases naturally, since none of those ever produce anything
+-            # else), VERIFIED/FAILED/INCONCLUSIVE only when a deterministic
+-            # verifier actually ran. Safe fallback for any executor that
+-            # predates S.8 and doesn't return this key at all.
+-            subtask.verification_state = _safe_verification_state(result.get("verification_state"))
+-
+-            if result.get("denied") and result.get("denial_reason") == "approval_required":
+-                subtask.status = SubtaskStatus.AWAITING_APPROVAL
+-                subtask.result = result
+-                subtask.touch()
+-                return "awaiting_approval"
+-
+-            if result.get("denied"):
+-                # Explicitly denied (not merely pending) — terminal, no silent retry.
+-                subtask.status = SubtaskStatus.FAILED
+-                subtask.error = result.get("error") or "permission denied"
+-                subtask.result = result
+-                subtask.touch()
+-                return "failed"
+-
+-            if result.get("success"):
+-                subtask.status = SubtaskStatus.DONE
+-                subtask.result = result
+-                subtask.error = None
+-                subtask.touch()
+-                return "done"
+-
+-            # A real execution failure (tool error, sandbox violation,
+-            # evaluator failure). Only retried if
+-            # agent/core/recovery.py::is_retryable() says the operation is
+-            # safe to blindly repeat — e.g. EDIT_FILE is deliberately
+-            # excluded (see recovery.py's docstring) — up to max_retries,
+-            # then give up.
+-            #
+-            # `approval_response is None` is a deliberate, additional gate:
+-            # if THIS attempt was authorized by an explicit
+-            # approval_response (a ONCE-scoped approval just consumed to
+-            # make this exact execution happen), a genuine execution
+-            # failure must NOT silently mint a brand-new ApprovalRequest
+-            # and loop back to AWAITING_APPROVAL — the caller explicitly
+-            # approved one execution, got a real failure, and should see
+-            # that failure, not an unrequested new permission prompt. This
+-            # does not affect SAFE/LOW-risk retries (approval_response is
+-            # always None for those — they never require one) or retries
+-            # covered by a standing SESSION/WORKSPACE_TIMED grant (those
+-            # also reach this point with approval_response=None, since the
+-            # grant auto-approves inside PermissionGateway.check() without
+-            # needing an explicit response) — both keep retrying exactly
+-            # as before.
+-            if (
+-                subtask.attempts <= subtask.max_retries
+-                and is_retryable(subtask.plan.task_type)
+-                and approval_response is None
+-            ):
+-                return "retry"
+-
+-            subtask.status = SubtaskStatus.FAILED
+-            subtask.error = result.get("error") or "execution failed"
+-            subtask.result = result
+-            subtask.touch()
+-            return "failed"
++        subtask.status = SubtaskStatus.FAILED
++        subtask.error = result.get("error") or "execution failed"
++        subtask.result = result
++        subtask.touch()
++        return "failed"
+ 
+     # ------------------------------------------------------------------
+     # Deterministic dispatch: Plan -> Tool Registry call(s)
+DIFFERENT
 
-## 1. Project identity
-**LANUX AI** â€” a locally-run Windows desktop AI/agent system (Python/Flask backend, deterministic agent execution pipeline, security-first design).
+===== agent\memory.py =====
+warning: in the working copy of 'C:\Users\nukra\Lanux\agent\memory.py', LF will be replaced by CRLF the next time Git touches it
+IDENTICAL
 
-## 2. Repository
-- Local (Cosmo's machine): `C:\Users\nukra\Lanux`
-- Canonical GitHub: https://github.com/nukrax/Lanux
-- **Important caveat about the commit hashes in this package.** The previous Claude never had the real repository or `.git` history. It worked from uploaded flat ZIP exports and created a **sandbox-local tracking repo** purely for diffing (branch `master`). Hashes such as `2a0a393` / `5ea9152` are **that sandbox repo's hashes**, not necessarily your real repo's. Match by commit *message* and by content, not by hash alone. Project workflow is that the user applies/commits/pushes on the real machine.
-
-## 3. Baseline
-- **Stage 3 commit: `2a0a393`** ("Stage 3: concurrency-safety prerequisites (P1-P5), hardening only"), full hash `2a0a39377f4326e464591a14d5909f38ce5a0e1c` (sandbox).
-- Full suite at that baseline: **1241 passed, 1 skipped, 0 failed.** The one skip is the environment-only `test_proposer_evaluation.py` skip (lanux_v2 checkpoint/tokenizer not present) â€” unrelated to this work.
-- The working tree was **clean** when Stage 4 implementation began (`git status --short` empty, HEAD `2a0a393`).
-
-## 4. Locked history (do not reopen)
-| Stage | Commit (sandbox) | Result |
-|---|---|---|
-| S.8 WATCHER | `9c10769` (baseline import `e0cde2c` in sandbox) | Verification centralized in `ToolRegistry.invoke()`; `VerificationState` = NOT_ATTEMPTED/VERIFIED/FAILED/INCONCLUSIVE; gated read-back; **no `AgentRole.WATCHER`**. 1200 tests. |
-| Stage 1 + 2 | `5ea9152` | Dependency-scoped failure containment; one-time graph validation; dependency-aware**single-worker** scheduler; deterministic list-order selection. 1216 passed / 1 skipped. |
-| Stage 3 | `2a0a393` | P1 ApprovalStore+ProjectStore locks; P2/P3 PermissionGateway approval-consume / duplicate-request atomicity (`_approval_lock`); P4 per-Task `state_lock` + `_persist` under it (lock order Task â†’ TaskStore); P5 `ResourceRef(project_id, path)` + pure `resources_overlap()` (declarative only). 1241 passed / 1 skipped. |
-
-## 5. Exact Stage 4 objective
-First real **intra-Task** concurrency. Bounded, deterministic, dispatcher-owned, resource-aware, fail-closed, persistent, reversible. Required pieces: **B1** canonical Task identity, **B2** single-dispatcher ownership, **B3** ProjectMemory/LongTermKnowledge locks, bounded concurrent subtask workers, completion queue, dispatcher-owned reconciliation, resource-conflict prevention (undeclared = exclusive), deterministic dispatch order, preserved failure isolation / retry, concurrency-safe cancellation, approval pause/resume draining, worker lifecycle safety, **deterministic Stage 4 tests**, regression validation. Nothing else.
-
-## 6. Approved architecture (preserve exactly)
-```
-ONE Task -> ONE dispatcher -> bounded concurrent subtask workers
-         -> completion queue -> dispatcher-owned reconciliation
-```
-- `BackgroundTaskExecutor` stays **exactly one worker**; concurrency lives **inside `TaskManager`**.
-- **Default concurrency = 1** and must reproduce Stage 2 behavior.
-- Dispatcher = sole authority for dependency evaluation, ready selection, resource-conflict selection, claiming, completion reconciliation, dependency propagation, finalization, cancellation bookkeeping, scheduler persistence.
-- Workers execute the claimed subtask and report; they do not schedule, evaluate dependencies, finalize, claim, or change ownership.
-- `Task.state_lock` never held across specialist/tool/model/filesystem/network execution or while waiting on the completion queue. Lock order stays Task lock â†’ TaskStore lock.
-- WATCHER, `ToolRegistry`, `PermissionGateway` (beyond Stage 3), routing, specialists, `recovery.py`, `BackgroundTaskExecutor` worker count: **locked**.
-
-## 7. What is already implemented in the working tree (5 modified files, uncommitted)
-Full detail in `CHANGES.md`; the authoritative artifact is `DIFF.patch` (verified to apply cleanly to a pristine export of HEAD and reproduce the working files byte-for-byte).
-
-- **B3 â€” `agent/memory.py`:** `threading.Lock` per instance on `LongTermKnowledge` (whole readâ†’idâ†’appendâ†’persist in `add_fact`; reads return copies) and `ProjectMemory` (`note_file_touched` whole readâ†’modifyâ†’persist; reads return copies). Schema unchanged.
-- **B1 â€” `task_manager.py`:** `_tasks_lock` (leaf) + `_adopt_canonical()` (`dict.setdefault` under the lock). `get_task`, `list_tasks`, `_create_task_core` use it so one Task id â‡’ one live object.
-- **B2 â€” `task.py` + `task_manager.py`:** `Task._dispatching` (not serialized, read/written only under `state_lock`). `run_task()` is now a thin wrapper: terminal early-return â†’ claim under lock (else raise `TaskAlreadyRunningError`) â†’ `_dispatch()` â†’ release in `finally`. `task_executor.py::_run_one` catches `TaskAlreadyRunningError` (logs, does **not** force-fail the Task); `_force_failed` now takes the Task lock. `backend/api.py` sync resume returns **409** on `TaskAlreadyRunningError`.
-- **Concurrency â€” `task_manager.py`:** `TaskManager(max_concurrent_subtasks=1)` (public attribute; `_concurrency_limit()` coerces to â‰¥1). `_dispatch()` loop: settle blocked â†’ `_launch_round()` (claims atomically under lock; first-fit, deterministic list order; capacity; resource conflicts; cancel check and "in-flight AWAITING_APPROVAL" check under the lock) â†’ block on `completions.get()` with no lock held â†’ `_reconcile()`. Workers: `_start_worker()` (limit 1 â‡’ **inline on the dispatcher thread**; else non-daemon `threading.Thread` named`lanux-subtask-<id>`), `_worker()` wraps the **unchanged** `_run_subtask()` and always puts exactly one `_Completion`. `_drain()` waits for/reconciles all in-flight workers on an exception path. Worker exception â‡’ subtask `FAILED` ("internal error during subtask execution (<ExcType>)"), audit event `subtask_exception`, dependents then skip normally.
-- **Approval/cancel in `_dispatch`:** `_approval_target()` binds a resume response to the AWAITING_APPROVAL subtask whose `result["raw"]["approval_request_id"]` matches `response.request_id` (else first awaiting = Stage 2behavior). An `awaiting_approval` outcome sets `paused` â‡’ stop launching, drain, return PARTIAL. Cancellation â‡’ stop launching, drain, then if any PENDING/AWAITING remain â†’ `_skip_remaining("cancelled")` + CANCELLED; otherwise normal finalization (preserves Stage 2's "cancel too late" outcome).
-- **Resource policy â€” `task_manager.py` + `task.py`:** `_subtasks_conflict()` (fail-closed: `None` resourcesâ‡’ conflicts with everything), `_effective_resources()` (explicit `subtask.resources` win, else `_derive_resources()`), `_FILE_PATH_TASKS` (READ_FILE, WRITE_FILE, EDIT_FILE, LIST_DIRECTORY, GET_PATH_INFO â‡’ canonical relative path; `"."` â‡’ whole project), `_WHOLE_PROJECT_TASKS` (RUN_TESTS, GIT_STATUS/ADD/COMMIT/PUSH, OPEN_PATH, OPEN_APPLICATION â‡’ `path=None`), **everything else exclusive** (RESEARCH, GENERATE_TEXT, GITHUB_*, SECRETS_*, UNKNOWN). `_canonical_relative_path()` realpath-resolves against the project workspace root (from `project_store`), rejects escapes, applies `os.path.normcase`. `ResourceRef.overlaps` now does component-wise directory containment (`_path_contains`, `"."` contains all).
-
-**Verified byte-identical to Stage 3 HEAD (deliberately untouched):** `_run_subtask`, `_apply_subtask_result`,`_advance_blocked_subtasks`, `_ready_subtasks`, `_select_next_ready_subtask`, `_next_subtask_to_run`, `_validate_dependency_graph`, `_final_task_status`, `_dependencies_satisfied`, `_first_failed_dependency_error`.
-
-## 8. What remains unfinished (nothing below has been done)
-1. **The Stage 4 test file does not exist.** None of the 45+ mandatory deterministic tests (B1/B2/B3, parallelism, dependencies, resources, failure, cancellation, approval, WATCHER, persistence, exceptions/drain) have been written. Suggested file: `tests/test_stage4_intra_task_concurrency.py` (LF/CRLF: repo is CRLF; convert new files to CRLF).
-2. **No mutation/no-op-lock validation has been run** for any Stage 4 race test.
-3. **The tiered regression was not run separately** after the final code state (see `TEST_STATUS.md`): only one full-suite run, at default concurrency 1, which exercises none of the new concurrent paths.
-4. **The API 409 path and the executor's `TaskAlreadyRunningError` handling are untested.** Fixtures to reuse:`tests/test_background_api.py` (`stack` + Flask test client) and `tests/test_task_executor.py`.
-5. No commit has been made. The required final commit message is `Stage 4: bounded intra-task parallel execution` â€” **only when genuinely complete**; do not push/merge.
-
-## 9. Known failures
-- **Current working tree: none known.** The last full-suite run was green (1241 passed, 1 skipped). This only proves concurrency=1 regression safety.
-- **Intermediate failures already fixed this session (history, do not reintroduce):**
-  1. `tests/test_task_manager.py::test_task_manager_never_imports_tools_directly` and `tests/test_error_recovery.py::test_task_manager_and_controller_never_call_tool_handlers_directly` failed because an early draft did `from tools.sandbox import SandboxPolicy` inside `task_manager.py`. **TaskManager must never import `tools.*`** (architecture guard). Fixed by computing the realpath locally in `_canonical_relative_path`. Also: the literal text `from tools` must not appear anywhere in `task_manager.py`, even in comments.
-  2. `tests/test_phase_d.py::test_running_status_persisted_before_first_subtask_finishes` failed when the worker called a new `_execute_attempts` instead of `_run_subtask` (tests monkeypatch `self._run_subtask` as the execution seam; `test_phase_e.py` does too). Fixed by restoring `_run_subtask` exactly and making the worker call `self._run_subtask(...)`. **Keep `_run_subtask` as the worker's entry point.**
-
-## 10. Known architectural concerns (please review, do not silently "fix")
-- **C1 (most important): reconciliation deviates from the literal contract wording.** The contract says the dispatcher applies the result under `Task.state_lock`. In the current code the worker's unchanged `_run_subtask()` commits the subtask's terminal status/attempts/verification atomically under the Task lock (the Stage 3 P4 behavior), and `_reconcile()` only pops the in-flight entry, joins the thread, converts a worker exception into `FAILED`, and persists. Reason: existing tests hook `_run_subtask`, and the contract also says the worker wraps the existing `_run_subtask()` unchanged. Consequences: (a) a committed-DONE subtask is visible to settle/launchbefore its `_Completion` is reconciled; (b) it still counts as in-flight for capacity/conflicts until reconciled; (c) mitigations already present in `_launch_round`: cancel flag read under the lock, and no launching whileany in-flight subtask has already committed AWAITING_APPROVAL. Decide whether this is acceptable or whether a dispatcher-side commit compatible with the `_run_subtask` hook seam is required. (A first attempt that moved the commit into the dispatcher broke the hook tests and was reverted.)
-- **C2: behavior change at limit 1.** Exceptions raised by `_run_subtask` are now contained as subtask `FAILED` rather than escaping `run_task()` (and leaving the subtask RUNNING until the executor's safety net force-failed the whole Task). No existing test depended on the old behavior.
-- **C3: path canonicalization is a local re-implementation.** Contract says "use existing Sandbox canonical path resolution where appropriate"; importing `tools.*` is forbidden by the architecture guard, `ToolRegistry` exposes no sandbox and is locked. Enforcement still lives only in the Sandbox at execution time; derivation only decides *conflict identity* and any doubt â‡’ exclusive.
-- **C4: Windows case/realpath behavior is UNKNOWN** â€” this sandbox is Linux. `os.path.normcase` is relied on; a Windows run (or a test that monkeypatches `os.path.normcase`) is needed. Symlink/junction behavior on Windows is unverified.
-- **C5: tasks on the global registry** (no project) have no known workspace root â‡’ only plain relative paths, textual normalization, **no symlink resolution**; absolute or `..` paths â‡’ exclusive.
-- **C6:** `_claim_subtask` does not persist (matches Stage 2); RUNNING is visible on disk only via later persists. Crash-orphan recovery is out of scope (no restart recovery exists anywhere).
-- **C7:** `_reconcile` does `in_flight.pop(record.subtask.id)` with no guard for an unknown id (cannot happen today).
-- **C8:** `completions.get()` has no timeout by design â€” a hung tool blocks its dispatcher (threads are never force-killed).
-- **C9:** `_note_project_memory` is still called inside `_run_subtask` (worker thread); safe now because of B3locks.
-- **C10:** Resource classification choices to confirm: browser/computer-control task types do not exist as `TaskType` members today; `OPEN_PATH`/`OPEN_APPLICATION` are treated as whole-project; `RESEARCH`, `GENERATE_TEXT`, `GITHUB_*`, `SECRETS_*`, `UNKNOWN` are exclusive (stricter than "whole project" â€” safe, but confirm intent).
-- **C11:** The approval-resume binding with **multiple** simultaneously AWAITING_APPROVAL subtasks (only the matching one is resumed; others stay awaiting â‡’ final PARTIAL) is implemented but completely untested.
-- **C12:** Project documents (ways of working) say never commit/push unless told; this stage's commit instruction is explicit and applies only when complete.
-
-## 11. Tests already run (exact; see TEST_STATUS.md)
-- After `task.py` edits: `test_stage3_concurrency_prerequisites.py` â€” 25 passed.
-- Targeted run after first dispatcher draft: **2 failed, 100 passed** (architecture guards, fixed).
-- Same four files after the fix: 81 passed.
-- Full suite `-x`: **1 failed, 625 passed** (stopped at `test_phase_d`, fixed).
-- Final full suite: **1241 passed, 1 skipped, 0 failed** (~131 s) â€” the only complete run of the final code.
-- No Stage 4 focused tests exist; no mutation checks; no separate tier runs since the last edit.
-
-## 12. Current git state (captured 2026-09-30T14:33Z)
-```
-branch: master (sandbox-local)        HEAD: 2a0a39377f4326e464591a14d5909f38ce5a0e1c
- M agent/core/task.py
- M agent/core/task_executor.py
- M agent/core/task_manager.py
- M agent/memory.py
- M backend/api.py
-(no untracked, deleted, or renamed files; no stash; no other branches)
- 5 files changed, 504 insertions(+), 85 deletions(-)
-2a0a393 Stage 3: concurrency-safety prerequisites (P1-P5), hardening only
-5ea9152 Stage 1+2: dependency-scoped failure containment and dependency-graph scheduling
-e0cde2c checkpoint 9c10769 baseline (imported, orchestration work)
-```
-`MODEL_PLANNING.md` is clean: running `tests/test_model_planner.py` rewrites that tracked file as a harmless side effect â€” **revert it after any full-suite run** (`git checkout -- MODEL_PLANNING.md`) and never commit it.
-
-Intentionally **not** changed: `agent/core/tool_registry.py` (WATCHER), `permissions.py`, `approval_store.py`,`project_store.py`, `task_store.py`, `router.py`, `model_registry.py`, `model_agent.py`, specialists, `recovery.py`, `controller.py`, `audit.py`, `secrets_store.py`, `BackgroundTaskExecutor` worker count/queue.
-
-## 13. Exact next safe action
-1. Verify the real repo matches this state (apply `DIFF.patch` onto a clean Stage 3 checkout, or confirm the five files are identical to `files/modified/`). Do **not** reset or rewrite.
-2. Read the five modified files and the diff against the Stage 4 contract; report findings; decide C1 with theuser if needed.
-3. Write `tests/test_stage4_intra_task_concurrency.py` (deterministic: Events/Barriers/queues, no sleeps as proofs). Reuse Stage 3's hook technique (park a thread inside the vulnerable window). Use a `TaskManager(registry, audit_log=..., task_store=..., max_concurrent_subtasks=N)` with `tm.executor = <probe>` for scheduling tests and the real registry for WATCHER/approval tests. Prove simultaneity with a `Barrier(n)` inside the probe (a sequential scheduler would time out).
-4. Mutation-check the race tests (temporarily no-op: `_tasks_lock`/`_adopt_canonical` â†’ plain assignment, `_dispatching` claim, `LongTermKnowledge._lock`, `ProjectMemory._lock`, resource conflict â†’ always False); discard the mutation artifacts.
-5. Run the tiers (focused, Stage 3, Stage 1+2, WATCHER, S.0â€“S.8 17-file subset, full), revert `MODEL_PLANNING.md`, check `git diff --stat`/scope, then **one** commit `Stage 4: bounded intra-task parallel execution`. No push/merge. Stop after the final report.
-
-## 14. Project boundary
-LANUX is completely separate from the NUKRAX WEB project. Nothing from it is in this package or may be added to LANUX.
+===== backend\api.py =====
+warning: in the working copy of 'C:\Users\nukra\Lanux\backend\api.py', LF will be replaced by CRLF the next time Git touches it
+IDENTICAL
 PS C:\Users\nukra\Lanux> 
