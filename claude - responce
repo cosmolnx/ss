@@ -1,0 +1,552 @@
+Here is the complete report, exactly as written to the file. No repository changes were made.
+
+---
+
+# LANUX — FUTURE ARCHITECTURE GAP AUDIT
+
+**Status:** READ-ONLY audit. Nothing was implemented, modified, committed, pushed or deployed. This report lives only in the analysis output area; it is **not** part of the LANUX repository.
+**Date:** 2026-10-06 · **Repository state at last verified capture:** branch `s8-integration`, HEAD `4fbad1a92bbb340db3d84b1e6375dbaaa529861e`, parent `9c10769…`, clean tree, `origin/s8-integration` == HEAD, `main` == `origin/main` == `853b736…` (Founder-pasted git output, 2026-10-06).
+**Scope rule honoured:** only the LANUX engineering repository was considered. NUKRAX Web was not inspected and nothing here reasons from it.
+**Locked constraints honoured:** D1–D10 are treated as fixed. Nothing here reopens them.
+
+Evidence labels used exactly: **OBSERVED · PARTIALLY OBSERVED · ABSENT · UNKNOWN (UNKNOWN / EVIDENCE REQUIRED) · FUTURE TARGET**.
+
+---
+
+## 1. Executive Summary
+
+**Read this first — evidence limitation.** I do not have the live repository. I have (a) two Evidence bundles containing a *subset* of the source at `4fbad1a`, (b) a full path/size/date inventory of the repo (tracked + ignored), (c) the previous session's handoff and investigation documents, (d) the 67-page specification and the Frontier PDF, and (e) the Founder's pasted git output. Where a module is known only by name and size I say so. **"ABSENT" in this report always means "absent from the source I could search", and I state the search scope each time.** Anything not searchable is UNKNOWN / EVIDENCE REQUIRED.
+
+**What LANUX is today (evidence-based):**
+- A local Windows desktop assistant: a from-scratch decoder-only transformer LM plus a coding agent plus a **governed execution kernel ("Agent Core")**: `Task → deterministic Planner → Subtasks → ToolRegistry.invoke → PermissionGateway → Sandbox → tool → AuditLog`, with persisted Task/Approval/Audit state, a WATCHER verification seam, bounded intra-Task concurrency (Stage 4, default concurrency 1) and rule-based retry.
+- The kernel is **real, tested and unusually disciplined** (78 test files; owner-stated 1374 passed / 1 skipped, not re-observed). Its governing property — deterministic control flow, no model in the authority path — is OBSERVED in code and docstrings.
+
+**What it can actually do on the autonomy scale:** A1 (Assisted Execution) is OBSERVED; A2 (Bounded Autonomy) is PARTIALLY OBSERVED; **A3 and above are not supported by repository evidence** (§5).
+
+**What it lacks (the structural gaps):**
+1. **No Objective, requirement, acceptance-criteria or evidence entity exists** in the searched source. "Completed" today is execution-oriented; verified completion has nothing to be verified *against* (D2/D3 are decided but unbuilt).
+2. **Verification is narrow:** WATCHER covers exactly two tools (`filesystem.write_file`, `filesystem.edit_file`) plus return-code evaluators for commands/tests; `VerificationState` is one enum per Subtask, overwritten per attempt; `ToolResult` carries no provenance/hash; Task summaries do not surface verification state.
+3. **Authority is coarse:** grants are keyed `(session_id="default", tool_name)` — project-, argument-, Task-agnostic (D5 gap); risk classification is path-blind, so there is no mechanism that could express the D4 protected-evaluator boundary.
+4. **A second, ungoverned execution path exists** (`/api/chat` → `Coder` → `Sandbox`) — transitional by D6.
+5. **Memory is flat and passive:** JSON stores of topic-keyed facts and per-file notes. **No world-model / Neural-Schema capability exists** in the searched source (§7).
+6. **Self-improvement is a documented, separate offline pipeline** (`self_improvement/`, 7 tracked files). I could not inspect its code; no code in the Task path calls it. Its relationship to D4 (evaluator independence) is UNKNOWN / EVIDENCE REQUIRED.
+7. **No delegation, no resource/budget management, no infrastructure control, no strategic/product capability.** These are ABSENT in the searched source and FUTURE TARGET per the Founder.
+
+**The first real engineering bottleneck (§20):** LANUX has an execution kernel but **no durable, integrity-protected record of requirements → evidence → verified completion**. Every stage of the Founder's lifecycle after "Controlled Experiment" presupposes such a record, D3 explicitly requires "recorded evidence", and D4 requires that record be protected from the work it judges. Two other foundations gate any *increase in autonomy*: scoped authorization (D5) and a single execution kernel (D6). **Nothing large and autonomous should be built before these** (§21).
+
+---
+
+## 2. Repository Evidence Scope
+
+| ID | Source | What it contains | Limits |
+|---|---|---|---|
+| S1 | Evidence bundle 1 (A1–A4 evidence) | `agent/core/{task,task_manager,tool_registry,permissions,audit,recovery,controller,approval_store,result}.py`, `agent/planner.py`, `agent/agent.py`, `backend/api.py` at/near HEAD | subset; no `memory.py`, auth/enrollment/secrets, `self_improvement/` |
+| S2 | Evidence-2 raw bundle | Source subset (`agent/coder.py`, `agent/evaluator.py`, `agent/core/*` incl. `bootstrap`, `dispatch_map`, `planning`, `router`, `specialists/`, `task_executor`, `task_store`, `project_store`, `model_registry*`, `provider_registry*`; `tools/`; `config/`; some tests; `ARCHITECTURE.md`, `AGENT.md`) + **full path inventory** (`all_paths.tsv`: path, tracked/ignored, size, mtime), directory summary, baseline and unmodified-check captures | content of many tracked files not included |
+| S3 | Handoff + investigation documents (2026-10-05) | prior-session findings, A1–A4, reproducibility gap report, Frontier reconciliation | derived material; used as secondary evidence and labelled where relied upon |
+| S4 | Specification PDF (67 pp) | long-term product/architecture target | target, not implementation proof |
+| S5 | Frontier PDF (29 pp) | architectural proposal | proposal, not contract (D8) |
+| S6 | Founder-pasted git output (2026-10-06) | HEAD, parents, remote refs, status, EOL state, `AGENT_CORE.md` history | remote refs as of last fetch |
+
+**Not available to me (named in inventory only):** `agent/memory.py` (5,087 B), `agent/core/auth_session.py` (15,609 B), `master_enrollment.py` (10,655 B), `secrets_store.py` (27,169 B), all of `self_improvement/` (7 files), `data_pipeline/` (10), `core/` model code (15), `training/` (8), `frontend/` (3), most of the 78 test files, and the tracked docs `SECURITY.md`, `SELF_IMPROVEMENT.md`, `PROPOSER_EVALUATION.md`, `SQL_BASH_IMPROVEMENT.md`, `SYSTEM_REPORT.md`, `DEVELOPMENT.md`. Findings that depend on them are marked PARTIALLY OBSERVED or UNKNOWN / EVIDENCE REQUIRED.
+
+**Tracked file distribution (S2 inventory):** tests 78 · agent 42 · repo root 31 · checkpoints 21 · core 15 · scripts 14 · experiment_records 11 · data_pipeline 10 · training 8 · tools 8 · logs 8 · self_improvement 7 · config 5 · frontend 3 · backend 3 · experiments 2.
+
+---
+
+## 3. Current LANUX Architecture
+
+### 3.1 Map (evidence-based)
+
+| Subsystem | Location | Evidence | Status |
+|---|---|---|---|
+| Language model (from-scratch decoder-only transformer, BPE tokenizer) | `core/`, `training/`, `config/` | `ARCHITECTURE.md`; inventory | OBSERVED (docs + files); code not inspected |
+| Legacy agent (chat-oriented orchestrator) | `agent/agent.py`, `coder.py`, `researcher.py`, `planner.py`, `evaluator.py`, `memory.py`, `model_planner.py` | S1/S2; `AGENT.md` | OBSERVED |
+| **Agent Core ("S5 kernel")** | `agent/core/` (Controller, TaskManager, ToolRegistry, PermissionGateway, AuditLog, TaskStore, ApprovalStore, ProjectStore, Router, specialists, recovery, bootstrap) | S1/S2 | OBSERVED |
+| Identity / auth / secrets | `agent/core/auth_session.py`, `master_enrollment.py`, `secrets_store.py` | names + sizes; `api.py` gating observed; tests named | PARTIALLY OBSERVED |
+| Tools | `tools/{filesystem,git,github,sandbox,terminal,web,windows}.py` | S2 | OBSERVED |
+| Backend / frontend | `backend/api.py` (59,816 B), `server.py`; `frontend/{index.html,app.js,style.css}` | S1/inventory | OBSERVED (backend); frontend not inspected |
+| Self-improvement | `self_improvement/{benchmark,evaluator,experiment,model_proposer,proposer,rollback}.py` | names/sizes; `ARCHITECTURE.md` | PARTIALLY OBSERVED |
+| Data & training recipe | `data_pipeline/`, `scripts/`, `experiment_records/`, `experiments/`, `logs/` | inventory | OBSERVED (existence); content UNKNOWN |
+
+### 3.2 Runtime and execution model
+- **Entry points:** `backend/server.py` → Flask `backend/api.py`. Agent Core is built in `agent/core/bootstrap.py`; the app starts **without a model** unless both `TOKENIZER_PATH` and `CHECKPOINT_PATH` exist (OBSERVED, S2).
+- **Task execution path (OBSERVED, `task_manager.py` docstring):** `Task → authoritative Planner → Task/Subtask → ToolRegistry → PermissionGateway → Sandbox/tool security → tool → ToolResult/Observation → Task state → Memory/Audit → next action`, with the statement "there is no second path to a tool handler anywhere in this module."
+- **Orchestration:** `Controller` is deterministic (docstring: reliability and security come from deterministic control flow, "not from a model deciding what to do"); `AgentRole.CONTROLLER` is reserved and `ModelRegistry.register()` rejects it (`ControllerRoleReservedError`). `Router` selects specialists deterministically by TaskType.
+- **Concurrency (Stage 4):** one dispatcher per Task, bounded subtask workers, completion queue, dispatcher-owned reconciliation; default concurrency 1 so parallelism is inert in production (S1/S3). A `BackgroundTaskExecutor` worker thread (`lanux-task-executor`, daemon) runs Tasks from a queue (S2 `task_executor.py`).
+- **Scheduling:** dependency-graph scheduling with resource-conflict protection exists (tests `test_dependency_graph_scheduling`, `test_stage3_concurrency_prerequisites`, `test_stage4_intra_task_concurrency`). **No time-based scheduler/cron** was found in the searched source (keyword search of S1/S2).
+- **State & persistence:** JSON stores (full-file rewrite) for Tasks, approvals, projects; append-only JSONL audit (`data/audit`). Runtime state files observed in inventory: `data/tasks` (16,151 B), `data/audit` (20,458 B), `data/approvals` (22 B), `data/projects` (199 B).
+- **Configuration:** `config/` (hardware detection, model and training config); registry configs `model_registry_config.py`, `provider_registry_config.py`.
+- **External integrations:** `tools/github.py`, `tools/web.py`, `tools/windows.py`, `tools/git.py`. No hosted LLM provider is registered; `ProviderKind.HOSTED` is a reserved enum value nothing constructs (S2 `provider_registry.py`).
+- **Error handling:** typed `ToolResult`s; sandbox blocks recorded as `blocked_by_sandbox`; rule-based retry (`recovery.py`); approvals expire.
+- **Testing architecture:** 78 test files in `tests/`, many pinned to phase contracts (e.g. `test_task_verification_s8`, `test_stage4_intra_task_concurrency`, `test_trust_origin`, `test_approval_identity_binding`, `test_endpoint_gating_s6`). Pass counts are OWNER-stated, not re-observed.
+
+---
+
+## 4. Authority & Permissions
+
+**Distinction recorded: Capability ≠ Authority.** LANUX has capability for `git.push`, `github.create_issue`, `github.create_pull_request`, `secrets.list_names`, `windows.*` etc. *Authority* to use them is a separate, gateway-mediated question.
+
+| Mechanism | Finding | Label | Evidence |
+|---|---|---|---|
+| Identity | Master-session authentication gates sensitive endpoints (`_resolve_master_session()`); master enrollment and auth-session modules exist | PARTIALLY OBSERVED | S1 `api.py`; `auth_session.py`/`master_enrollment.py` names+sizes, tests named; internals UNKNOWN |
+| Provenance of a Task | `TrustOrigin` ∈ {`MASTER_AUTHENTICATED`, `LOCAL_UNAUTHENTICATED`}, immutable, **provenance only** (not an authorization input) | OBSERVED | S1 `task.py`, `audit.py` docstring; `test_trust_origin` |
+| Roles | `AgentRole` enum (CODER, RESEARCHER, TESTER_DEBUGGER, GIT_PROJECT_OPS, SECRETS_OPS, COMPUTER_AUTOMATION, PLANNER_ANALYST; CONTROLLER reserved) — *routing* roles, not permission roles | OBSERVED | S2 `model_agent.py`/`router.py` |
+| Risk-based authorization | `RiskLevel` SAFE/LOW/MODERATE/HIGH/CRITICAL; base risk per tool; only two escalation inputs (`credential_name`, five command patterns) | OBSERVED | S1 `permissions.py`, `tool_registry.py` |
+| Approval gates | Pending `ApprovalRequest`s persisted; human response via master-gated `POST /api/approval/<id>`; scope defaults to `once` | OBSERVED | S1 `api.py`, `permissions.py` |
+| Standing grants | `SESSION` (in-memory, no expiry, not persisted) and `WORKSPACE_TIMED` (persisted, default 900 s, caller-settable TTL; no cap seen); **keyed `(session_id, tool_name)`**; CRITICAL never receives one | OBSERVED | S1 `permissions.py` |
+| Resource permissions | Path confinement in `Sandbox`; **no path-aware authorization in the gateway** | OBSERVED (sandbox) / ABSENT (gateway) | S2 `tools/sandbox.py`; keyword search of `tools/filesystem.py` found no protected-path logic |
+| Escalation | Human approval request; `expired`/`denied`/`cancelled` outcomes | OBSERVED | S1 `audit.py` actions |
+| Revocation | Grants expire (TTL) or end with process (SESSION). **No explicit revoke API** found in the searched source | PARTIALLY OBSERVED | UNKNOWN whether a revoke exists in unseen modules |
+| Delegation of authority | None | ABSENT | searched S1/S2 |
+
+**Gaps against locked decisions:** D5 (grant binding to project/resource/args; HIGH ONCE-only; mandatory finite lifetime — SESSION is currently unbounded) is **not met**; D4's protected boundary has **no enforcement primitive** (risk classification is path-blind; `filesystem.write_file/edit_file` are LOW, auto-approved, confined only to the workspace root).
+
+---
+
+## 5. Autonomy
+
+The A-scale labels were supplied without definitions; I read them as: A0 advises only; A1 executes only under per-action human approval/supervision; A2 executes multi-step work unattended inside pre-authorized bounds; A3 additionally verifies its own results independently before proceeding; A4/A5 delegate authority and set strategy. This reading is mine and is stated so it can be corrected.
+
+| Level | Label | Evidence and reasoning |
+|---|---|---|
+| A0 Advisory | **OBSERVED** | Chat text generation; `PlannerAnalyst` is advisory/non-executable and hard-blocked in the Router (S2 `planner_analyst_agent.py`, `router.py`). |
+| A1 Assisted Execution | **OBSERVED** | Tasks execute real tools through the governed chain; MODERATE+ actions require explicit human approval; approvals persist and resume Tasks (S1/S2). |
+| A2 Bounded Autonomy | **PARTIALLY OBSERVED** | SAFE/LOW operations auto-execute within sandbox and gateway bounds; multi-subtask Tasks run unattended in a background thread; timed standing grants allow repeated MODERATE actions without re-approval. *Why only partial:* planning is rule-based over a fixed message→TaskType table; chains are linear; no recovery from interruption; the bounds that exist are coarse (D5 gap) and not independently verified. |
+| A3 Verified Autonomy | **ABSENT** as a system property | Verification exists for two tools plus return-code evaluators; INCONCLUSIVE/NOT_ATTEMPTED leave subtasks DONE; no requirement/evidence record; Task `COMPLETED` ignores verification state (D3 keeps it execution-oriented by decision). Nothing verifies *outcomes against goals*. |
+| A4 Delegated | **ABSENT** | No authority delegation mechanism (§12). |
+| A5 Strategic | **ABSENT** / FUTURE TARGET | No goal-setting or strategic entities (§17). |
+
+**Highest level supported by evidence: A1 firmly, A2 partially. Not A3.**
+
+---
+
+## 6. Agents & Intelligence
+
+| Area | Finding | Label | Evidence |
+|---|---|---|---|
+| Specialist agents | Seven wrapper modules over tool calls: `coder`, `researcher`, `tester_debugger`, `git_ops`, `secrets_ops` (implemented); `computer_automation` (`implemented=False`); `planner_analyst` (advisory, non-executable) | OBSERVED | S2 `agent/core/specialists/` |
+| Specialists execute rather than propose | Specialists invoke tools through the registry; there is no "proposal" output type | OBSERVED | S3 handoff; `specialists/_common.py` |
+| Orchestration | Deterministic `Controller`/`Router`; routing by TaskType | OBSERVED | S1/S2 |
+| Agent lifecycle (creation, retirement, replacement) | None; roster fixed in code | ABSENT | searched S1/S2 |
+| Agent configuration | Descriptor-based model/provider registries (`model_registry_config.py`, `provider_registry_config.py`) | PARTIALLY OBSERVED | S2 |
+| Agent communication / delegation | None; subtasks are dispatched, not delegated; only `actor` attribution in audit | ABSENT | searched S1/S2 |
+| Model routing | None (Router is by TaskType, not by model capability) | ABSENT | S2 `router.py` |
+| Tool use | Static `build_default_registry`; 19 Task-reachable tools (S2 §); no governed path for adding tools | OBSERVED | S2 `tool_registry.py` |
+| Planning | Deterministic regex/keyword `Planner`; production decomposition emits linear chains; `ModelScoredPlanner` is experimental and documented as scoring 40% vs 100% for rules, **not wired in** | OBSERVED | `AGENT.md`; S2 `planning.py` |
+| Reasoning | No model reasoning in the Task path | OBSERVED | S1 `controller.py` docstring |
+| Task decomposition | Deterministic only | OBSERVED | S2 `planning.py` |
+
+**Real versus terminology:** the ten-name roster (D8) is a vocabulary. Runtime reality: seven wrappers and mechanisms; WATCHER, SENTINEL and MEMORY exist as *mechanisms* (verifier seam; gateway/risk/sandbox/vault; JSON stores), not agents; ARCHITECT, ARTISAN, VECTOR, HACKATHON are ABSENT as capabilities.
+
+---
+
+## 7. Memory & Knowledge (incl. Neural Schema)
+
+**Neural Schema status: FUTURE TARGET. No evidence of any implementation.** The term does not appear in the specification text, the Frontier PDF, the handoff, the UI text files, or the bundled source (the only "neural" hit is a test fixture string, "neural network"). Where it is defined is UNKNOWN / EVIDENCE REQUIRED.
+
+### 7.1 The five capabilities, kept separate
+
+| Capability | Evidence | Label |
+|---|---|---|
+| **Persistent memory** | `ShortTermMemory` (in-memory conversation turns); `ProjectMemory` and `LongTermKnowledge` persist to JSON and reload across instances (`tests/test_agent.py`); `TaskStore` reuses the same JSONStore | OBSERVED |
+| **Knowledge storage** | `LongTermKnowledge.add_fact(topic, content, source, reliability)`; `ProjectMemory.note_file_touched(path, note)` / `get_file_notes(path)` — flat, topic- or path-keyed | OBSERVED (flat) |
+| **Retrieval** | `get_facts(topic)`, `Researcher.recall(topic)` return stored facts; matching mechanism UNKNOWN (`memory.py` not in bundles); no evidence of semantic retrieval; `core/embeddings/embeddings.py` is documented as the model's token embedding + positional encoding, not a retrieval component | PARTIALLY OBSERVED; mechanism UNKNOWN / EVIDENCE REQUIRED |
+| **World-model representation** | No entity, relationship, ontology, belief/hypothesis, world-state structure in any bundled source; inventory path names show none; Frontier "World Model" (§7) is a proposal; engineering-state foundation (F3) is not implemented | ABSENT (searched S1/S2 source + full inventory names) |
+| **Evolving Neural Schema** | None | ABSENT (same scope) / FUTURE TARGET |
+
+### 7.2 Checklist you specified
+
+| Item | Evidence | Label |
+|---|---|---|
+| Concepts | Topic strings as dictionary keys only | ABSENT |
+| Entities | None | ABSENT |
+| Memories | Notes, facts and turns (persistence sense) | PARTIALLY OBSERVED (flat) |
+| Relationships | None. `dependency_graph` and `ResourceRef` are subtask scheduling and path identity, not knowledge relations | ABSENT |
+| States | Task/Subtask *execution* state is persisted; no model of world/environment state | PARTIALLY OBSERVED (execution only) |
+| Observations | `ToolResult`s, audit entries, `VerificationState` record outcomes; no observation store feeds any model | PARTIALLY OBSERVED (execution records) |
+| Experiences | `experiment_records/` are offline training-run records, not agent experience | ABSENT (agent experience) |
+| Learned connections | None | ABSENT |
+| Uncertainty | `reliability` float on facts; `PlanProposal.confidence` (perplexity-derived); `INCONCLUSIVE` verification state. Scalars/enum only; no uncertainty model | PARTIALLY OBSERVED |
+| Knowledge evolution | No supersede/version/decay/freshness logic found (keyword search); handling of repeated facts UNKNOWN | ABSENT (searched) |
+| Temporal/contextual relationships | None; project-level separation exists as separate store paths (inferred from `bootstrap.py` constructing `ProjectMemory(project_memory_path)`) | ABSENT (temporal) / PARTIALLY OBSERVED (project scoping) |
+
+**`ProjectMemory` and `LongTermKnowledge` are not the Neural Schema.** They are flat JSON key-value stores. In the Task path their only consumer found is research-tool registration (`build_default_registry(knowledge=...)`) plus construction in `bootstrap.py`; no code in `agent/core` feeds stored facts into planning or reasoning. INFERRED: a ~5 KB module holding three memory classes plus a store leaves little room for graph or semantic machinery (a hint, not evidence).
+
+### 7.3 Related spec targets (FUTURE TARGET unless noted)
+Durable Project Memory, Memory Provenance (partial: a `source` field exists), Conflict-Aware Updates, Selective Forgetting, Scoped Memory Boundaries, Explicit Memory Control, Preference Learning, Knowledge Currency Tracking, Facts-vs-inference-vs-hypothesis labeling (Frontier §7). **Facts vs inference vs hypothesis distinction: ABSENT** in stored data (a fact has `reliability`, nothing marks inference/hypothesis). **Failure history:** training-side only (`logs/`, `experiment_records/`); no agent failure-history store (ABSENT in searched source). **Evidence tracking:** ABSENT as a store (see §10).
+
+---
+
+## 8. Self-Improvement
+
+Three concepts kept distinct:
+- **Self-improvement** = evaluating and comparing versions to accept/reject.
+- **Self-modification** = changing its own code/weights/tools.
+- **Capability expansion** = acquiring a new governed capability.
+
+| Question | Finding | Label | Evidence |
+|---|---|---|---|
+| Documented pipeline | PROPOSE → ISOLATE → MODIFY → TEST → BENCHMARK → COMPARE → ACCEPT/REJECT → ROLLBACK | PARTIALLY OBSERVED (documented; code unseen) | `ARCHITECTURE.md`; `self_improvement/{proposer,model_proposer,experiment,benchmark,evaluator,rollback}.py` exist |
+| Evaluate itself | Agent-level `evaluate_test_result` (`returncode == 0`) and `evaluate_command_result`; `self_improvement/evaluator.py` "compares benchmark scores between model/code versions" (docstring) | PARTIALLY OBSERVED | S2 `agent/evaluator.py` |
+| Detect capability gaps | None | ABSENT (searched S1/S2) | — |
+| Learn from experience/failures | No runtime learning from Task outcomes into memory or planning | ABSENT (searched S1/S2) | — |
+| Modify workflows / improve reasoning / tools | None in Task path; planner swap is a manual developer step (`AGENT.md`) | ABSENT | — |
+| Modify its own code | Pipeline exists on paper (MODIFY stage on candidate directories, `experiment.py` constructs a `Sandbox`); behavior and write targets UNKNOWN / EVIDENCE REQUIRED | UNKNOWN | gap G-U5 |
+| Test / verify modifications | Tests and benchmark modules exist; whether evaluation data is held out is UNKNOWN (D10) | PARTIALLY OBSERVED | `test_self_improvement`, `test_code_benchmark`, `test_proposer_evaluation` named |
+| Safely integrate | No automated integration; changes enter by human commit | ABSENT (automation) | git history/handoff |
+| Roll back | `self_improvement/rollback.py` exists (3,299 B), content unseen; **no rollback in the Task path** (no checkout/reset/stash tool) | PARTIALLY OBSERVED / ABSENT (Task path) | inventory; searched S1/S2 |
+| Integration with the governed kernel | **None:** bundled `agent/core` source references `self_improvement` only in docstrings/comments | OBSERVED (no code link) | grep of S1/S2 |
+
+**Conclusion:** LANUX has a *documented offline research-and-comparison pipeline* for the LM and proposer experiments. It does **not** demonstrably self-modify, self-diagnose, or expand capability in operation, and it is not connected to the governed kernel. **D4 conformance of the pipeline (can the candidate modify its own evaluator/benchmark/records?) is UNKNOWN / EVIDENCE REQUIRED.** Read-only commands to settle it were given earlier (`git grep` for write targets in `self_improvement/` and `agent/evaluator.py`).
+
+---
+
+## 9. Research & Experimentation
+
+Lifecycle comparison — Founder lifecycle: **Research → Hypothesis → Experiment → Evidence → Research Prototype → Validate → Technology**.
+
+| Stage | Repository evidence | Label |
+|---|---|---|
+| Research | `Researcher` (web fetch → facts with source/reliability); `data_pipeline/` (downloaders, cleaners, dedup) | PARTIALLY OBSERVED |
+| Hypothesis | No explicit hypothesis record type; `experiments/lanux_v2.md` may contain prose (unseen) | ABSENT (as a structure) / UNKNOWN (prose) |
+| Experiment | `scripts/architecture_experiment.py`, `train_lanux*.py`; `experiments/lanux_v2.json|md`; `experiment_records/` (11); training logs (8) | OBSERVED (files) |
+| Experiment isolation | Documented (`ISOLATE` stage, Sandbox in `experiment.py`) | UNKNOWN / EVIDENCE REQUIRED |
+| Evidence collection | Per-run records and eval JSONs tracked; whether they capture seeds, tokenizer, corpus hash is UNKNOWN (G-U2); **no `lanux_v1` record and no `eval_v2`** (inventory) | PARTIALLY OBSERVED |
+| Research prototype stage | No stage/quarantine concept | ABSENT |
+| Validate | Benchmarks/eval scripts exist; held-out separation UNKNOWN (D10) | PARTIALLY OBSERVED |
+| Technology (production transition) | Manual: a human commits; no gated promotion path | ABSENT (governed transition) |
+| Failure/archive paths | Rollback module exists; archive policy UNKNOWN | UNKNOWN |
+| Reproducibility | Dependencies unpinned (no lockfile), floating-ref corpora, no evidence of seeds, `data/raw`/`data/processed` absent in a clean clone (G-V1, G-V6, G-V7, G-I1) | OBSERVED (gaps) |
+
+**Founder lifecycle "Capability → Controlled Experiment → Evidence → Verification → Authorization → Integration → Monitoring":** Controlled experiment (partial, offline) · Evidence (ad hoc files) · Verification (narrow) · Authorization (gateway, coarse) · Integration (manual) · Monitoring (audit only; no metrics). **The lifecycle is not implemented as a connected pipeline.**
+
+---
+
+## 10. Verification & Evaluation
+
+Target chain: **Intent → Action → Evidence → Verification → Result**.
+
+| Link | Evidence | Label |
+|---|---|---|
+| Intent | `Task.message` → deterministic Planner → typed Subtasks | OBSERVED |
+| Action | Every side effect through `ToolRegistry.invoke()` → gateway → sandbox | OBSERVED (Task path); **bypassed by legacy `/api/chat`** |
+| Evidence | `ToolResult`, per-invocation audit entries, WATCHER read-back; **`ToolResult` has no provenance/hash; no evidence store; no requirement entity** | PARTIALLY OBSERVED |
+| Verification | `VerificationState` (NOT_ATTEMPTED / VERIFIED / FAILED / INCONCLUSIVE) per Subtask; WATCHER seam covers exactly `filesystem.write_file` and `filesystem.edit_file`; test/command evaluators (`returncode == 0`) in `_from_tool_result`; most TaskTypes always NOT_ATTEMPTED | PARTIALLY OBSERVED |
+| Result | `TaskStatus` six values; `_final_task_status` ignores `verification_state`; `_summarize` emits `[task_type] status` per subtask only | PARTIALLY OBSERVED |
+
+**Behavior ladder (OBSERVED):** tool success + VERIFIED/NOT_ATTEMPTED/INCONCLUSIVE → subtask DONE; verification FAILED → success flipped to False and normal retry rules apply (retry only if retryable, within `max_retries`, no explicit approval response); contradictory evidence has no representation.
+
+| Capability | Label |
+|---|---|
+| Postcondition checks | PARTIALLY OBSERVED (two tools) |
+| Deterministic validation | PARTIALLY OBSERVED |
+| Test execution | OBSERVED (`terminal.run_tests`, MODERATE) |
+| **Independent verification (D4)** | **ABSENT** — an evaluated Task can edit tests (LOW, auto-approved, no protected-path logic) and run them to a recorded VERIFIED (follows from OBSERVED facts; not probed) |
+| Self-verification | PARTIALLY OBSERVED (same producer/trust domain) |
+| Evaluation harnesses | PARTIALLY OBSERVED (`evaluate_checkpoint.py`, benchmark modules; held-out status UNKNOWN) |
+| Regression detection | PARTIALLY OBSERVED (test suite exists; no automated regression gate on LANUX's own changes observed) |
+| Confidence/uncertainty | PARTIALLY OBSERVED (INCONCLUSIVE; scalars) |
+| Verification after autonomous actions | PARTIALLY OBSERVED (two tools) |
+| Objective-level verified completion (D3) | ABSENT / FUTURE TARGET |
+
+**Corrections carried from earlier:** no production path reaches the false-COMPLETED condition at this HEAD (Evidence-2 §3); interrupted Tasks stay stuck non-terminal.
+
+---
+
+## 11. Recovery & Resilience
+
+| Mechanism | Finding | Label | Evidence |
+|---|---|---|---|
+| Retry | Identical re-execution within one run; `attempts <= max_retries` (default 2), `is_retryable(task_type)` (all except `EDIT_FILE`, `GIT_COMMIT`), and `approval_response is None`; no model in control flow | OBSERVED | S1 `recovery.py`, `task_manager.py` |
+| Cancellation | Cooperative `cancel_requested` flag; orphan `cancel()` sets flag and returns True without dispatching | OBSERVED | S2/S1 |
+| Rollback / state restoration | None in the Task path | ABSENT (searched S1/S2) | no checkout/reset/stash tool |
+| Checkpointing | None for Tasks (training checkpoints only) | ABSENT | — |
+| Crash recovery | **None** — executor docstring documents no restart recovery; persisted RUNNING Tasks stay RUNNING; startup only re-validates persisted approval requests | OBSERVED | S2 `task_executor.py`, `bootstrap.py` |
+| Orphan detection | None yet (D7 approves detection/surfacing only) | ABSENT / approved FUTURE | D7 |
+| Failure isolation | Per-subtask failure; dependency-aware skipping; Stage 4 resource-conflict protection | OBSERVED | S1 |
+| Degraded mode | App runs without any model | OBSERVED | S2 |
+| Escalation | Human approval requests; no automatic escalation of failures | PARTIALLY OBSERVED | — |
+| Safe shutdown | `lanux-task-executor` is a daemon thread; subtask worker threads are non-daemon | OBSERVED (thread flags); shutdown semantics UNKNOWN | S2/S1 |
+| Autonomous failure handling | None; failure → retry or FAILED | ABSENT | — |
+
+**Conclusion:** LANUX **retries and raises**; it does not recover intelligently. D7 deliberately limits near-term work to detect-and-surface; unknown outcomes are UNKNOWN, neither success nor failure.
+
+---
+
+## 12. Delegation
+
+| Question | Finding | Label |
+|---|---|---|
+| Delegate tasks to agents | Subtasks are *dispatched* deterministically to specialist wrappers; no negotiation, scope or acceptance | PARTIALLY OBSERVED (dispatch ≠ delegation) |
+| Delegate authority | None; D5 forbids any component minting/transferring standing authority | ABSENT |
+| Assign work to humans | Only human approval requests | PARTIALLY OBSERVED |
+| Assign work to software/machines | Tool invocations (git, GitHub, Windows) | PARTIALLY OBSERVED |
+| Define scope / revoke | No delegation scope object; grant expiry only | ABSENT |
+| Verify delegated results | WATCHER for two tools; otherwise none | PARTIALLY OBSERVED |
+| Maintain attribution | `actor` (who performed) and `originator` (authenticated provenance) recorded per audit entry | OBSERVED |
+
+---
+
+## 13. Infrastructure & Resources
+
+| Area | Finding | Label |
+|---|---|---|
+| Compute | Local machine; `config/config.py` hardware detection (training oriented) | OBSERVED |
+| Storage | Local JSON/JSONL files; ignored runtime directories; repo is canonical home (D9) | OBSERVED |
+| Processes | One executor thread, Stage 4 workers (default 1), subprocess execution via sandbox | OBSERVED |
+| Environments | One workspace per project via `ProjectStore`; no environment provisioning | PARTIALLY OBSERVED |
+| Credentials | Secrets vault (`secrets_store.py`, rotation tests); GitHub tools take `credential_name`; internals UNKNOWN | PARTIALLY OBSERVED |
+| External services | GitHub, web fetch | OBSERVED |
+| Hardware | Local only; no robotics/IoT hooks | ABSENT |
+| Resource limits | Command timeouts (e.g. 30 s on the chat run-tests path), sandbox confinement, Stage 4 concurrency bound | PARTIALLY OBSERVED |
+| Budgets / quotas / cost | None | ABSENT (searched S1/S2) |
+| Provisioning / monitoring | None | ABSENT |
+
+**What LANUX can actually control today:** files inside a project workspace, git, GitHub issues/PRs/push (HIGH), a subprocess allowlist, Windows operations (placeholder-grade), credentials via the vault. It cannot provision, allocate or monitor infrastructure.
+
+---
+
+## 14. Human + AI + Machine Operating Model
+
+| Relationship | Implemented | Label |
+|---|---|---|
+| Human ↔ LANUX | Chat; Task API; approval/response flow; master session | OBSERVED |
+| LANUX ↔ specialized AI agents | Fixed wrappers dispatched by a deterministic router; no inter-agent protocol | PARTIALLY OBSERVED |
+| LANUX ↔ software automation | git/GitHub/web/Windows tools via the kernel | OBSERVED |
+| LANUX ↔ autonomous infrastructure | None | ABSENT |
+| LANUX ↔ hardware/machines/robots | None; no physical-safety hooks | ABSENT / FUTURE TARGET |
+| Human ↔ AI division of authority | Approvals gate MODERATE+ actions; standing grants can blur this (D5) | PARTIALLY OBSERVED |
+
+---
+
+## 15. Security / Safety / Privacy
+
+| Area | Finding | Label | Evidence |
+|---|---|---|---|
+| Authentication | Master session/enrollment gate sensitive endpoints; `/api/chat` is master-gated | PARTIALLY OBSERVED | S1 `api.py`; modules unseen |
+| Authorization | Gateway with five risk levels; coarse grants (§4) | OBSERVED (with D5 gap) | S1 |
+| Secrets | Vault module, rotation tests, API boundary tests | PARTIALLY OBSERVED | names/tests; internals UNKNOWN |
+| Isolation / sandboxing | Path confinement; command allowlist (first-token) and denylist; denylist is stated to be "a secondary guard" | OBSERVED | S2 `tools/sandbox.py` |
+| Code-execution safety | `terminal.run_tests` runs workspace tests with `shell=True`; Task path interpolates `test_path` unescaped (Evidence-2 §5.4) | OBSERVED (a residual hazard) | S2 |
+| Tool safety | Per-tool risk; CRITICAL never standing; `COMPUTER_AUTOMATION` unimplemented | OBSERVED | S1/S2 |
+| Data protection / privacy | Local-only stores; no hosted provider registered; no encryption-at-rest evidence for stores (UNKNOWN) | PARTIALLY OBSERVED | S2; UNKNOWN |
+| Audit controls | Append-only JSONL by convention; **no hash/prev-hash field in `AuditEntry`** (tamper-evidence not observed) | OBSERVED (fields) / UNKNOWN (integrity enforcement) | S1 `audit.py` |
+| Dangerous-action controls | HIGH/CRITICAL approvals; CRITICAL non-standing | OBSERVED | S1 |
+| Human approval | Present, persisted, expiring | OBSERVED | S1 |
+| Fail-safe behavior | Unknown/invalid persisted approvals are rejected on startup; denial is the default for unmet checks | PARTIALLY OBSERVED | S2 `bootstrap.py`/`permissions.py` |
+| Governance bypasses | **`/api/chat` path ungoverned** (0 audit lines in probe); no protected-evaluator boundary | OBSERVED | Evidence-2 §2 |
+| Physical safety hooks | Not applicable today | ABSENT | — |
+
+`SECURITY.md` exists but was not available to me; I do not treat the existence of the document or of the named mechanisms as evidence of security.
+
+---
+
+## 16. Auditability / Observability
+
+| Area | Finding | Label |
+|---|---|---|
+| Logs | `AuditLog` JSONL: id, timestamp, task_id, subtask_id, actor, tool_name, risk, action, detail, originator | OBSERVED |
+| Structured events | Action vocabulary: `auto_approved, approval_requested, approved, denied, expired, cancelled, executed, blocked_by_sandbox, error` (+ `verification_inconclusive`) | OBSERVED |
+| Task traces | Persisted Tasks/Subtasks with status and results; `GET /api/tasks/<id>/audit` | OBSERVED |
+| Decisions / approvals | Recorded with responder and scope | OBSERVED |
+| Agent/tool attribution | `actor` + `tool_name` + `originator` | OBSERVED |
+| Evidence/verification records | Verification state on Subtask only; no durable evidence record | PARTIALLY OBSERVED |
+| Integrity of records | No hash chain observed | ABSENT (observed fields) / UNKNOWN (enforcement) |
+| Monitoring / metrics | None found in searched source | ABSENT |
+| Chat path | No audit trail | ABSENT |
+
+**Can a consequential Task-path action be reconstructed after the fact?** Largely **yes** (who/what/when/risk/approval and outcome summary), **provided** it ran through the kernel. It is not tamper-evident, does not record full evidence, and **cannot be reconstructed for legacy chat execution**.
+
+---
+
+## 17. Strategic & Product Capabilities
+
+| Capability | Finding | Label |
+|---|---|---|
+| Create / modify / launch / operate / retire products | No product entity; `ProjectStore` is a workspace registry | ABSENT (searched S1/S2) |
+| Research new technology | `Researcher` fetches pages; no technology-evaluation process | PARTIALLY OBSERVED (information gathering) |
+| Enter new technology domains | None | ABSENT |
+| Allocate resources / make strategic decisions | None | ABSENT |
+| Manage organizational structures | None | ABSENT |
+
+All are **FUTURE TARGET**. No claim of existence is made. (NUKRAX Web was not inspected.)
+
+---
+
+## 18. Compatibility Assessment
+
+Classification of the current architecture against the Founder-approved future architecture and locked decisions.
+
+| Area | Classification | Reasoning / evidence |
+|---|---|---|
+| Execution kernel (Task/TaskManager/ToolRegistry/Gateway/Audit) | **Compatible** | It *is* the intended spine (D2, D6); contracts are explicit and tested |
+| Objective layer (D2) | **Compatible with extension** | Task contracts closed; wrapper can consume TaskManager records; no existing entity to conflict with; decomposition authority unresolved |
+| Verification (D3/WATCHER) | **Compatible with extension** | Seam and states exist; completion/evidence layer must be added *around* it; WATCHER stays unchanged |
+| Protected evaluation boundary (D4) | **Requires restructuring** | Risk classification is path-blind and grants tool-keyed; a distinct authority boundary needs a new authorization primitive. Evidence: `classify_risk` has two inputs; no protected-path logic |
+| Standing grants (D5) | **Requires restructuring** | Key format `(session, tool)` is a persisted contract; project/resource binding, mandatory expiry and HIGH-ONCE-only change grant semantics and a pinned test |
+| One execution kernel (D6) | **Architectural conflict (known, transitional)** | `/api/chat` → `Coder` → `Sandbox` bypasses the chain; acknowledged by D6 |
+| Crash recovery (D7) | **Compatible with extension** | Detect-and-surface only; persisted state supports classification; no re-execution authorized |
+| Specialists (D8) | **Compatible** | Capability labels over existing wrappers/mechanisms |
+| Model artifacts/lineage (D9/D10) | **Compatible with extension** | Weights/tokenizers tracked or retained; provenance records and pinning absent; no LFS (`.gitattributes` absent) |
+| Memory / Neural Schema | **Compatible with extension (greenfield)** | Existing stores are flat and unconstrained; nothing to conflict; nothing to build on |
+| Self-improvement ↔ kernel | **Unknown** | Pipeline unseen; no code link to kernel; D4 conformance unknown |
+| Model advisory layer (D1) | **Compatible with extension** | Advisory `PlannerAnalyst` and registries exist; no proposal contract or provenance recording yet |
+| Delegation / agent lifecycle / infrastructure / strategy | **Requires restructuring (new)** | Nothing exists; constraints from D1/D2/D5 will shape them |
+
+**Evidenced conflicts:** (1) D6 vs `/api/chat` (Evidence-2 §2 probe: 0 audit/approval/Task records vs governed control). (2) D4 vs path-blind gateway + tool-keyed grants (S1 `permissions.py`, `tool_registry.py`; keyword search of `tools/filesystem.py`). (3) D5 vs `SESSION` grants with no expiry and tool-wide key (S1 `permissions.py`).
+
+---
+
+## 19. Consolidated Gap Matrix
+
+Priority: **P0** blocks safe progress · **P1** needed before the next capability tier · **P2** later.
+
+| Capability | Current State | Evidence | Classification | Future Requirement | Gap | Priority |
+|---|---|---|---|---|---|---|
+| Authority | Tool-keyed grants, five risk levels, human approvals | S1 `permissions.py` | PARTIALLY OBSERVED | Project/resource-scoped, finite, HIGH-ONCE-only (D5) | Grant key and lifetime model | P0 |
+| Autonomy | A1 observed, A2 partial | §5 | PARTIALLY OBSERVED | A3 verified autonomy before any A4 | Verification and evidence | P1 |
+| Delegation | Dispatch only; no authority delegation | §12 | ABSENT | Scoped, revocable, attributable delegation | Entire mechanism | P2 |
+| Agent management | Fixed wrappers; static registries | S2 | PARTIALLY OBSERVED | Governed lifecycle, contracts per role (D8) | Role contracts, lifecycle | P2 |
+| Memory | Flat JSON stores, passive | §7 | PARTIALLY OBSERVED | Provenance-bearing, scoped, evolving memory | Structure, consumers | P1 |
+| Neural Schema | None | §7 | ABSENT / FUTURE TARGET | Defined evolving world model (not yet specified) | Definition and everything | P2 |
+| Self-improvement | Offline documented pipeline; unlinked | §8 | PARTIALLY OBSERVED / UNKNOWN | Governed, D4-independent loop | Independence, kernel link | P1 |
+| Capability expansion | Manual code changes only | §6, §8 | ABSENT | Capability → experiment → … → monitoring | Whole pipeline | P2 |
+| Research | Fetch + facts; data pipeline | §9 | PARTIALLY OBSERVED | Hypothesis/evidence-linked research | Hypothesis records | P2 |
+| Experimentation | Scripts, records, logs | §9 | PARTIALLY OBSERVED | Isolated, reproducible, tracked | Reproducibility, isolation proof | P1 |
+| Evaluation | `returncode` evaluators, benchmarks | §10 | PARTIALLY OBSERVED | Held-out, protected evaluation (D4/D10) | Independence, held-out proof | P0 |
+| Verification | WATCHER on 2 tools; enum state | §10 | PARTIALLY OBSERVED | Objective-level, evidence-based (D3) | Requirements, evidence records | P0 |
+| Recovery | Retry + raise; orphans stuck | §11 | PARTIALLY OBSERVED | Detect/surface orphans (D7); later safe recovery | Detection; side-effect contracts | P1 |
+| Uncertainty handling | `reliability` float, INCONCLUSIVE | §7, §10 | PARTIALLY OBSERVED | UNKNOWN as first-class outcome (D7/D3) | Representation and use | P1 |
+| Escalation | Human approvals only | §4 | PARTIALLY OBSERVED | Policy-driven, evidence-driven escalation | Triggers, routing | P2 |
+| Resource management | Timeouts, concurrency bound | §13 | PARTIALLY OBSERVED | Budgets, limits, allocation | Budget model | P2 |
+| Infrastructure management | None | §13 | ABSENT | Governed provisioning/monitoring | Entire | P2 |
+| Security | Strong baseline, known bypasses | §15 | PARTIALLY OBSERVED | Close bypasses, boundary enforcement | D4/D5/D6 | P0 |
+| Safety | Approvals, sandbox, CRITICAL non-standing | §15 | PARTIALLY OBSERVED | Fail-safe for autonomous actions | Autonomy-level safeguards | P1 |
+| Privacy | Local-first; hosted providers unregistered | §15 | PARTIALLY OBSERVED | Egress policy for any hosted advisory provider | Policy undefined (open phase decision) | P1 |
+| Auditability | Append-only JSONL with attribution | §16 | PARTIALLY OBSERVED | Tamper-evident, evidence-bearing, complete | Integrity, chat path | P0 |
+| Observability | Audit only | §16 | ABSENT (metrics) | Metrics, monitoring | Whole | P2 |
+| Strategic decision-making | None | §17 | ABSENT | Governed strategy under constitution | Entire | P2 |
+| Product creation | None | §17 | ABSENT | Product lifecycle | Entire | P2 |
+| Technology creation | Offline experiments only | §9 | ABSENT | Research-to-technology path | Entire | P2 |
+| Organizational management | None | §17 | ABSENT | Organizational model | Entire | P2 |
+| Human/AI/machine coordination | Human approvals; software tools | §14 | PARTIALLY OBSERVED | Defined roles and authority | Machine/agent coordination | P2 |
+
+---
+
+## 20. Foundational Bottleneck
+
+### The smallest set of foundations currently preventing safe progress
+
+1. **Protected evidence and state-of-record.** There is no first-class Objective, requirement, acceptance-criterion or evidence record, and the audit/state records are not integrity-protected. D3 requires "recorded evidence"; D4 requires that this evidence and the evaluator be unreachable by the evaluated work; D7's orphan detection and every later memory/world-model, research-tracking and delegation-attribution capability attach to the same substrate.
+2. **Scoped authorization (D5) with an enforceable protected boundary (D4).** Grants are tool-wide and the gateway is path-blind. Raising autonomy above A2 on this base multiplies risk without adding verifiable capability.
+3. **A single execution kernel (D6).** While `/api/chat` executes outside the chain, no record the kernel produces is complete.
+
+### The first real engineering bottleneck
+> **LANUX can execute under governance but cannot establish, record, or protect the evidence that a goal was actually achieved.** The lifecycle *Capability → Controlled Experiment → Evidence → Verification → Authorization → Integration → Monitoring* is blocked at **Evidence/Verification**, the stage every later stage reads from.
+
+### What to build first (capability-level only; no design)
+**A protected, integrity-preserving state-of-record that links Objective → requirements → Task executions → evidence → verification outcomes**, consuming TaskManager records without changing Stage 4, WATCHER, `TaskStatus` or retry semantics, and with the D4 authority boundary treated as part of the same capability (evidence the evaluated work can edit is not evidence).
+
+Why this first: (a) it is the missing input to D3's completion layer; (b) it unlocks D7 detection, honest UNKNOWN outcomes, memory provenance, experiment tracking and delegation attribution; (c) it is a *consumer* of existing kernel records, so it adds capability without adding a second orchestration authority (D2); (d) it improves governability rather than trading it away. **D5 and D6 are prerequisites for any autonomy increase but not capability multipliers; they should land before autonomy is raised, in parallel or immediately after.**
+
+This is a recommendation for Founder review, not a plan or an authorization.
+
+---
+
+## 21. Premature Build Warnings
+
+Do **not** build now:
+1. **A2→A4 autonomy features** (unattended multi-Task operation, delegated authority, strategic autonomy): the verification, evidence and authorization bases are not in place.
+2. **A Neural Schema / world model:** undefined, no evidence base, no consumers; D1 requires any model-influenced decision to pass a deterministic contract that does not exist yet.
+3. **Self-modifying or self-expanding loops:** D4 independence for `self_improvement/` is UNKNOWN; no kernel link; no governed integration path.
+4. **Additional runtime agents/roles (ARCHITECT, VECTOR, MEMORY, HACKATHON…):** D8 forbids creation without separate decisions; they would add authority surface with no contracts.
+5. **Hosted advisory providers:** phase policy is unresolved; egress, credential, provenance and injection controls are undefined.
+6. **Automatic recovery, resume, replay, checkpoints, rollback:** D7 defers them; no side-effect/idempotency contracts exist.
+7. **Task-internal replanning or graph-emitting planners; Objective-level replanning:** deferred by D7; decomposition authority unresolved (D2).
+8. **Objective-bound or Task-bound standing authority:** D5 leaves Objective-bound authority unresolved.
+9. **Task fleets / large parallel specialist execution:** Stage 4 deferment; concurrency default is 1.
+10. **Infrastructure provisioning, budgets, product/strategy modules:** nothing exists to govern them; they would outrun auditability.
+11. **Large-scale retraining or corpus rebuilds:** not authorized; lineage and held-out separation are UNKNOWN (D10).
+
+---
+
+## 22. Recommended Engineering Sequence
+
+Dependency order (recommendation; each step needs its own Founder approval, design and verification; none is authorized by this audit):
+
+0. **Close evidence gaps (read-only):** whole-repo keyword/structure audit of `agent/memory.py`, `self_improvement/*`, auth/enrollment/secrets modules, `SECURITY.md`; resolve G-U items (§23).
+1. **Protected evidence/state-of-record foundation** (Objective-linked requirements, evidence with provenance, integrity), including the D4 boundary requirement.
+2. **Scoped authorization per D5** (project/resource binding, finite lifetime, HIGH ONCE-only) and the **enforcement primitive the D4 boundary needs**.
+3. **D6 migration of chat execution into the kernel** and **D7 orphan detection/surfacing**.
+4. **Objective-level completion layer** consuming evidence (D3), WATCHER unchanged.
+5. **Controlled-experiment lifecycle** wired through the governed path; D4 firewall for `self_improvement/` investigated first.
+6. **Advisory model contract** (D1): proposal type, acceptance gate, model-call provenance — only after the phase policy on hosted providers is decided.
+7. **Memory and world-model work** (including any Neural Schema definition) on top of the evidence substrate.
+8. **Higher-order capabilities** (delegation, resource management, strategy) only after A3 is demonstrable.
+
+---
+
+## 23. Unknowns / Evidence Required
+
+| # | Unknown | Evidence required |
+|---|---|---|
+| U1 | Whether any live code defines or references a "Neural Schema" / world model | Whole-repo `git grep` for `neural.?schema|world.?model|ontolog|entity|belief|hypothes` |
+| U2 | `agent/memory.py` retrieval mechanism, duplicate-fact handling, update semantics | Read `agent/memory.py` (class/def listing) |
+| U3 | `core/embeddings/embeddings.py` role (model embedding vs retrieval) | Read first 40 lines |
+| U4 | Whether `self_improvement/*` can modify its own evaluators/benchmarks/records (D4); where outputs are written | `git grep` write targets (`write_text`, `open(`, `shutil`, `os.replace`, `Sandbox(`) in `self_improvement/` and `agent/evaluator.py` |
+| U5 | Whether evaluation data is held out from training corpora (D10) | Read `scripts/evaluate_checkpoint.py`, `experiment_records/eval_*.json` keys |
+| U6 | Whether `corpus_sources.json` pins revisions; upstream revision of each cached archive | Read `data_pipeline/corpus_sources.json`; list tarball top-level folder names |
+| U7 | Whether experiment records capture seeds/tokenizer/corpus hash | Read key names of `experiment_records/*.json` |
+| U8 | Provenance of the loaded 2 MB checkpoint | Provenance work item (D9) |
+| U9 | Internals of auth session, master enrollment and secrets vault; any revoke API | Read modules + tests |
+| U10 | Whether audit records are tamper-evident or integrity-checked beyond append-only convention | Read `AuditLog.record` implementation fully; look for hashing |
+| U11 | What the audit records after execution (result/outcome) and whether a post-crash side effect can be established from it | Read `ToolRegistry.invoke` result auditing |
+| U12 | Frontend behavior: does the approval UI tell the approver the true scope of a standing grant? | Inspect `frontend/app.js` |
+| U13 | Any consumer in `agent/core` of `ProjectMemory`/`LongTermKnowledge` beyond research registration | `git grep` for the three memory classes |
+| U14 | License status of third-party corpora; legal stance (D10 policy: record UNKNOWN) | Per-source license review by Founder/counsel |
+| U15 | Remote size/LFS/privacy limits on GitHub (D9) | Hosting verification |
+| U16 | Complete list of TaskTypes with evaluators/verifiers | Read `dispatch_map.py` / `_from_tool_result` fully |
+| U17 | `logs/` tracked directory purpose (8 training logs tracked) — only relevant to hygiene | Inventory note, no action |
+| U18 | Whether tracked docs (`SECURITY.md`, `SELF_IMPROVEMENT.md`, etc.) match code | Read documents against code |
+| U19 | Test counts and pass state | Run test suite (not authorized here; OWNER-stated 1374 passed, 1 skipped) |
+
+**Read-only commands that settle U1–U4, U13 (for the Founder to run):**
+```powershell
+cd C:\Users\nukra\Lanux
+git --no-optional-locks grep -n -i -E "neural.?schema|world.?model|ontolog|knowledge.?graph|entity|belief|hypothes" -- '*.py' '*.md' '*.json'
+Select-String -Path agent\memory.py -Pattern "class |def "
+git --no-optional-locks grep -n -E "ProjectMemory|LongTermKnowledge|ShortTermMemory" -- '*.py'
+Get-Content core\embeddings\embeddings.py | Select-Object -First 40
+git --no-optional-locks grep -n -E "write_text|\.write\(|open\(|shutil|os\.replace|json\.dump|Sandbox\(" -- self_improvement agent/evaluator.py
+git --no-optional-locks grep -n "evaluator" -- self_improvement
+```
+
+---
+
+## 24. Evidence Index
+
+| Ref | Evidence | Used for |
+|---|---|---|
+| S1 | `agent/core/task.py` (`VerificationState`, `SubtaskStatus`, `TaskStatus`, `TrustOrigin`) | §4, §10, §11 |
+| S1 | `agent/core/task_manager.py` (module docstring; `_apply_subtask_result`; `_from_tool_result`; `_final_task_status`; `_summarize`) | §3, §10, §11 |
+| S1 | `agent/core/tool_registry.py` (`_apply_verification`; ToolSpec verifiers; `build_default_registry`) | §4, §10 |
+| S1 | `agent/core/permissions.py` (`RiskLevel`, `classify_risk`, `ApprovalScope`, grant creation/lookup, TTL) | §4, §15, §19 |
+| S1 | `agent/core/audit.py` (`AuditEntry` fields; append-only JSONL) | §15, §16 |
+| S1 | `agent/core/recovery.py` (`is_retryable`; no-model instruction) | §11 |
+| S1 | `agent/core/controller.py` (deterministic control-flow docstring) | §3, §6 |
+| S1 | `backend/api.py` (master gating; `POST /api/approval/<id>`; task endpoints; chat endpoint) | §4, §15 |
+| S2 | `agent/core/{bootstrap,dispatch_map,planning,router,specialists/*,task_executor,task_store,project_store,model_registry*,provider_registry*}.py` | §3, §6, §11, §13 |
+| S2 | `agent/{coder,evaluator}.py`; `tools/{sandbox,filesystem,git,github,terminal,web,windows}.py`; `config/*` | §3, §8, §10, §13, §15 |
+| S2 | `tests/test_agent.py` (memory persistence and research tests) | §7 |
+| S2 | `ARCHITECTURE.md`, `AGENT.md` | §3, §6, §8 |
+| S2 | `INVENTORY-RAW/all_paths.tsv`, `dir_summary.tsv`, `00_baseline.txt`, `99_repo_unmodified_check.txt` | §2, §3, §8, §9 |
+| S3 | `LANUX_ARCHITECTURAL_HANDOFF.md`; `EVIDENCE-2-REPORT.md` (A1–A4, §2 chat probe, §3 recovery, §5.4); `REPRODUCIBILITY-GAP-REPORT.md` (G-V*, G-I*, G-U*); `FRONTIER-RECONCILIATION-AND-TARGET-ARCHITECTURE.md`; `EXACT-UNRESOLVED-DECISIONS.md` | §1, §10, §11, §15, §18, §23 |
+| S4 | `Lanux-Specifications.pdf` text (memory/learning/permission/self-improvement sections) | §7, §5 |
+| S5 | `LANUX_Frontier_Engineering_Intelligence_Architecture.pdf` text (World Model §7; roster) | §6, §7 |
+| S6 | Founder-pasted git output (2026-10-06) | header, §2 |
+
+**Method notes:** all "ABSENT" labels name the searched scope (S1/S2 bundled source, plus path names in the full inventory). Keyword searches included: objective, requirement, acceptance, goal, entity, relationship, world model, ontology, belief, hypothesis, observation, experience, concept, uncertainty/confidence/reliability, freshness/stale/superseded, embedding/similarity, schedule/cron/daemon, rollback, self_improvement. No claim in this report depends on running code.
+
+---
+
+**STOP.** This is an audit only. No implementation was started, no architecture was changed, no files in the repository were touched. Awaiting Founder review and authorization.
