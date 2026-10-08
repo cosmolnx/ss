@@ -1,0 +1,634 @@
+
+PS C:\Users\nukra\Lanux> git grep -n -E "localStorage|sessionStorage|Authorization|Bearer|/api/login|/api/whoami|authentication required" -- "*.html" "*.js"
+PS C:\Users\nukra\Lanux> git grep -n -E "/api/(chat|task|login|enroll|whoami)|fetch|XMLHttpRequest" -- .
+
+AGENT.md:11:   status/diff), `agent/researcher.py` (fetch URLs, extract text, store facts with
+AGENT.md:34:the backend API exposes free-text `/api/chat` for conversational/task-routing use, and
+ARCHITECTURE.md:61:`/api/chat`, `/api/status`, `/api/model`, `/api/history` — all backed by `LanuxAgent`,
+CORPUS_V2_REPORT.md:5:## Per-repo fetch results
+CORPUS_V2_REPORT.md:7:| Repo | Files listed | Files fetched | Status |
+CORPUS_V2_REPORT.md:32:- Items in (raw fetched + local): 260
+CORPUS_V3_DOCS_REPORT.md:5:## Per-repo fetch results
+CORPUS_V3_DOCS_REPORT.md:7:| Repo | Files listed | Files fetched | Status |
+CORPUS_V3_DOCS_REPORT.md:35:- Items in (raw fetched + local): 305
+DEVELOPMENT.md:20:| 9 | Internet research | **Done, functionally** — `tools/web.py` + `agent/researcher.py`, tested against a local HTTP server (this build sandbox restricts outbound network to package registries — see SYSTEM_REPORT.md — so live-internet fetch needs to be exercised on your machine; the code path itself is fully implemented and tested) |
+DEVELOPMENT.md:40:   - `POST /api/chat` with "list the files" → dispatched to `list_directory`.
+DEVELOPMENT.md:41:   - `POST /api/chat` with "run the tests" → dispatched to `run_tests` (correctly
+DEVELOPMENT.md:44:   - `POST /api/chat` with "git status please" → dispatched to `git_status`.
+DEVELOPMENT.md:45:   - `POST /api/chat` with "LANUX is" → dispatched to `generate_text` and produced
+DEVELOPMENT.md:142:- Data pipeline hardened: `data_pipeline/archive_source.py` (codeload.github.com tarball fetching — works around GitHub API's 60/hr unauthenticated rate limit), caching, retry-with-backoff, `main`/`master`/`unstable` branch fallback, length-bucket-optimized dedup, rejection-reason tracking, configurable size limits.
+DEVELOPMENT.md:204:  BSD-3-Clause, reused an already-cached tarball — zero new network fetch),
+DEVELOPMENT.md:207:  by fetching both LICENSE files before adding, not assumed).
+EXPERIMENT_DESIGN_V3_DOCS.md:35:| `pallets/flask` | `docs/` (`.rst`) | BSD-3-Clause (same as the Flask source already in the corpus) | Real API/concept documentation, Sphinx-authored technical prose. **Reuses the already-cached tarball from the existing `pallets/flask:src/flask` source — zero new network fetch, zero new disk for archive caching.** |
+EXPERIMENT_DESIGN_V3_DOCS.md:37:| `rust-lang/book` | `src/` (`.md`) | Dual MIT/Apache-2.0 — verified directly by fetching `LICENSE-MIT` and `LICENSE-APACHE` from the repo (both returned HTTP 200) before adding this source, per "do not silently use sources with unclear licensing" | The one genuinely new download in this stage. Chosen because it is real long-form *instructional* prose — explaining programming concepts through worked examples — which is a different kind of writing than API reference docs, and closer to what a model would need to explain a proposed *change* rather than a fixed API. Small repo (~5.7MB archive). |
+EXPERIMENT_DESIGN_V3_DOCS.md:39:All three integrate through the existing `fetch_repo_files_via_archive` /
+SYSTEM_REPORT.md:49:| Web research module | Network in this sandbox is restricted to package registries (PyPI/npm/GitHub) — general web fetch/search must run on the user's own machine, not in this build sandb
+ox |
+WEB_INTERFACE.md:20:| `/api/chat` | POST `{"message": "..."}` | Routes the message through `LanuxAgent`,
+ returns `{text, task_type, success}` |
+WEB_INTERFACE.md:35:- `app.js` — posts to `/api/chat`, renders user/assistant/error messages, polls
+agent/core/controller.py:99:        session check (see backend/api.py's /api/task route) — this
+agent/core/dispatch_map.py:193:            f"in the /api/task response) before any dispatch occurs, whic
+h would expose a "
+agent/core/dispatch_map.py:195:            f"here and at the /api/task layer (see backend/api.py) and re
+mains reachable only "
+agent/core/planning.py:29:this case: when a caller (the new /api/task endpoint) already knows exactly
+agent/core/secrets_store.py:520:        /api/task/<id> HTTP response — none of which are safe channels f
+or
+agent/core/specialists/researcher_agent.py:6:`agent/researcher.py::Researcher` (fetch a list of URLs the
+ caller
+agent/core/task.py:55:    since Phase S has not yet gated /api/task or /api/chat (see
+agent/core/task_executor.py:64:GET /api/task/<id> (reflecting whatever TaskStore last persisted — see
+agent/core/task_executor.py:224:        # GET /api/task/<id>, per "do not expose sensitive internal deta
+ils
+agent/core/task_executor.py:233:        # failure is visible to GET /api/task/<id> and survives a restar
+t
+agent/core/task_manager.py:252:    # /api/task handler, a specialist, a retry/resume path, a test helper
+agent/core/task_manager.py:284:        /api/task, /api/chat's Controller.handle(), and every pre-S.5
+agent/core/task_manager.py:1317:                    f"/api/chat path in this version."
+agent/core/tool_registry.py:38:from tools.web import fetch_url
+agent/core/tool_registry.py:469:    # /api/task/<id> HTTP response — none of which are safe channels for
+agent/core/tool_registry.py:609:        name="web.fetch_url", category="web", risk=RiskLevel.MODERATE,
+agent/core/tool_registry.py:610:        handler=lambda url, timeout=10: fetch_url(url, timeout=timeout),
+agent/planner.py:95:    # -> TaskManager/TaskStore/the /api/task response, exactly like
+agent/researcher.py:5:Pipeline: receive a task -> fetch allowed URLs -> extract text -> do basic
+agent/researcher.py:23:from tools.web import fetch_url, FetchResult
+agent/researcher.py:45:    successful fetch with real content scores higher than a failed or empty
+agent/researcher.py:68:            result = fetch_url(url)
+backend/api.py:5:  POST /api/chat     -> {"message": "..."}  returns the agent's response
+backend/api.py:10:  Phase E — Agent Core task/approval endpoints (additive; /api/chat and the
+backend/api.py:12:  POST /api/task                    -> create + run a task via LANUX-S5
+backend/api.py:13:  GET  /api/task/<task_id>          -> current task state (survives restart)
+backend/api.py:14:  POST /api/task/<task_id>/cancel   -> request cancellation
+backend/api.py:26:  POST /api/enroll                  -> one-time master-vault enrollment,
+backend/api.py:33:  POST /api/login                   -> master passphrase -> bearer
+backend/api.py:39:  GET  /api/whoami                  -> resolves Authorization: Bearer
+backend/api.py:335:            "No master vault exists yet. To enroll, POST to /api/enroll\n"
+backend/api.py:383:    @app.route("/api/chat", methods=["POST"])
+backend/api.py:557:    @app.route("/api/task", methods=["POST"])
+backend/api.py:606:                    f"'{explicit_task_type.value}' cannot be created via /api/task: t
+his "
+backend/api.py:660:    # from /api/task above. These three routes NEVER call
+backend/api.py:731:    @app.route("/api/enroll", methods=["POST"])
+backend/api.py:776:    @app.route("/api/login", methods=["POST"])
+backend/api.py:779:        # /api/enroll above): the server intentionally binds 0.0.0.0, and
+backend/api.py:824:        that needs it (/api/whoami, /api/approval/<id> since S.3, and
+backend/api.py:841:    @app.route("/api/whoami")
+backend/api.py:892:            # Mirrors /api/login's own mapping for an uninitialized
+backend/api.py:946:        # read as "you're still logged in." A fresh POST /api/login with
+backend/api.py:950:    @app.route("/api/task/<task_id>")
+backend/api.py:959:    @app.route("/api/tasks/<task_id>/audit")
+backend/api.py:974:    @app.route("/api/tasks")
+backend/api.py:986:    @app.route("/api/task/<task_id>/cancel", methods=["POST"])
+backend/api.py:1012:        # /api/whoami's own resolution chain exactly (header ->
+data_pipeline/archive_source.py:44:def fetch_repo_files_via_archive(
+data_pipeline/archive_source.py:65:    result = _fetch_one_ref(
+data_pipeline/archive_source.py:73:            fallback_result = _fetch_one_ref(
+data_pipeline/archive_source.py:82:def _fetch_one_ref(
+data_pipeline/downloader.py:2:Downloader — fetches permitted, publicly accessible text/code for the corp
+us.
+data_pipeline/downloader.py:6:  - Only fetches URLs the caller explicitly lists (no autonomous crawling)
+.
+data_pipeline/downloader.py:7:  - Checks robots.txt before fetching from a given host and skips disallow
+ed
+data_pipeline/downloader.py:10:  - Records source metadata (URL, license note if provided, fetch time) w
+ith
+data_pipeline/downloader.py:27:from tools.web import fetch_url, FetchResult
+data_pipeline/downloader.py:28:from data_pipeline.github_source import fetch_with_retry, DownloadCache
+data_pipeline/downloader.py:37:    fetched_at: float = field(default_factory=time.time)
+data_pipeline/downloader.py:41:    """Caches robots.txt parsers per host so we don't re-fetch it every r
+equest."""
+data_pipeline/downloader.py:55:                # If robots.txt can't be fetched/parsed, fail safe: treat
+ as allowed
+data_pipeline/downloader.py:64:        return parser.can_fetch(user_agent, url)
+data_pipeline/downloader.py:115:        Returns None if robots.txt disallows it, the fetch fails after
+data_pipeline/downloader.py:118:        runs resumable and avoids re-fetching unchanged sources.
+data_pipeline/downloader.py:132:        result: FetchResult = fetch_with_retry(url, max_attempts=self.ma
+x_attempts)
+data_pipeline/github_source.py:7:     re-run of the corpus builder never re-fetches a URL it already has
+.
+data_pipeline/github_source.py:16:Retry with backoff is provided by `fetch_with_retry`, wrapping
+data_pipeline/github_source.py:17:tools/web.py's `fetch_url`.
+data_pipeline/github_source.py:28:from tools.web import fetch_url, FetchResult
+data_pipeline/github_source.py:37:def fetch_with_retry(url: str, max_attempts: int = 3, base_delay: floa
+t = 0.5, timeout: int = 15) -> FetchResult:
+data_pipeline/github_source.py:41:        result = fetch_url(url, timeout=timeout)
+data_pipeline/github_source.py:64:    fetched_at: float = field(default_factory=time.time)
+data_pipeline/github_source.py:71:    builder runs skip URLs that were already fetched (or already faile
+d
+data_pipeline/github_source.py:110:        return (time.time() - entry.get("fetched_at", 0)) < retry_aft
+er_sec
+data_pipeline/github_source.py:118:            "license_note": license_note, "status": "ok", "fetched_at
+": time.time(),
+data_pipeline/github_source.py:124:                                "status": "failed", "fetched_at": tim
+e.time()}
+data_pipeline/github_source.py:157:    result = fetch_with_retry(api_url)
+frontend/app.js:41:    const res = await fetch("/api/status");
+frontend/app.js:56:    const res = await fetch("/api/model");
+frontend/app.js:109:async function fetchPendingApprovalFor(task, subtask, { retry = true } = {}) {
+frontend/app.js:111:    const res = await fetch("/api/approvals/pending");
+frontend/app.js:125:    return fetchPendingApprovalFor(task, subtask, { retry: false });
+frontend/app.js:211:      const res = await fetch(`/api/approval/${encodeURIComponent(request.id)}`, {
+frontend/app.js:257: * Generalized tool-activity logging: /api/chat only ever produced one
+frontend/app.js:258: * outcome per turn, but /api/task can return several subtasks (e.g.
+frontend/app.js:287: * The single place that turns a Task object (from POST /api/task,
+frontend/app.js:288: * GET /api/task/<id>, or the resumed Task returned by POST /api/approval)
+frontend/app.js:324:      let request = await fetchPendingApprovalFor(task, subtask);
+frontend/app.js:360:    const res = await fetch("/api/approvals/pending");
+frontend/app.js:366:        const taskRes = await fetch(`/api/task/${encodeURIComponent(request.task_id)
+}`);
+frontend/app.js:395:    const res = await fetch("/api/chat", {
+scripts/build_corpus.py:54:            print(f"  SKIPPED (robots.txt or fetch error): {url}")
+scripts/build_corpus_v2.py:23:from data_pipeline.archive_source import fetch_repo_files_via_archive
+scripts/build_corpus_v2.py:47:        result = fetch_repo_files_via_archive(
+scripts/build_corpus_v2.py:67:    print(f"\nTotal raw items fetched: {len(all_items)}")
+scripts/build_corpus_v2.py:82:        f.write("## Per-repo fetch results\n\n")
+scripts/build_corpus_v2.py:83:        f.write("| Repo | Files listed | Files fetched | Status |\n|---|--
+-|---|---|\n")
+scripts/build_corpus_v2.py:84:        for name, listed, fetched, status in per_repo_report:
+scripts/build_corpus_v2.py:85:            f.write(f"| {name} | {listed} | {fetched} | {status} |\n")
+scripts/build_corpus_v2.py:87:        f.write(f"- Items in (raw fetched + local): {report.items_in}\n")
+scripts/build_corpus_v3_docs.py:39:from data_pipeline.archive_source import fetch_repo_files_via_archive
+scripts/build_corpus_v3_docs.py:63:        result = fetch_repo_files_via_archive(
+scripts/build_corpus_v3_docs.py:83:    print(f"\nTotal raw items fetched: {len(all_items)}")
+scripts/build_corpus_v3_docs.py:98:        f.write("## Per-repo fetch results\n\n")
+scripts/build_corpus_v3_docs.py:99:        f.write("| Repo | Files listed | Files fetched | Status |\n|-
+--|---|---|---|\n")
+scripts/build_corpus_v3_docs.py:100:        for name, listed, fetched, status in per_repo_report:
+scripts/build_corpus_v3_docs.py:101:            f.write(f"| {name} | {listed} | {fetched} | {status} |\n
+")
+scripts/build_corpus_v3_docs.py:103:        f.write(f"- Items in (raw fetched + local): {report.items_in
+}\n")
+tests/conftest.py:27:         POST /api/enroll route,
+tests/conftest.py:28:      2. logs in through the actual POST /api/login route,
+tests/conftest.py:70:        r = client.post("/api/enroll", json={"token": captured["token"], "passphras
+e": passphrase})
+tests/conftest.py:72:        r2 = client.post("/api/login", json={"passphrase": passphrase})
+tests/conftest.py:99:    (missing-Authorization 401 checks, /api/enroll's own loopback-only
+tests/test_api_task_endpoints.py:47:        # a real checkpoint — keeps the legacy /api/chat path determ
+inistic
+tests/test_api_task_endpoints.py:71:    r = env["client"].post("/api/task", json={"message": "list the f
+iles"})
+tests/test_api_task_endpoints.py:79:    r = env["client"].post("/api/task", json={})
+tests/test_api_task_endpoints.py:84:    r = env["client"].post("/api/task", json={"message": "x", "expli
+cit_task_type": "not_a_real_type"})
+tests/test_api_task_endpoints.py:89:    r = env["client"].post("/api/task", json={"message": "x", "expli
+cit_args": "not-a-dict"})
+tests/test_api_task_endpoints.py:94:    r1 = env["client"].post("/api/task", json={
+tests/test_api_task_endpoints.py:101:    r2 = env["client"].post("/api/task", json={
+tests/test_api_task_endpoints.py:110:    created = env["client"].post("/api/task", json={"message": "lis
+t the files"}).get_json()
+tests/test_api_task_endpoints.py:111:    r = env["client"].get(f"/api/task/{created['id']}")
+tests/test_api_task_endpoints.py:117:    r = env["client"].get("/api/task/nonexistent-task-id")
+tests/test_api_task_endpoints.py:122:    created = env["client"].post("/api/task", json={"message": "lis
+t the files then run the tests"}).get_json()
+tests/test_api_task_endpoints.py:123:    r = env["client"].post(f"/api/task/{created['id']}/cancel")
+tests/test_api_task_endpoints.py:129:    r = env["client"].post("/api/task/nonexistent-task-id/cancel")
+tests/test_api_task_endpoints.py:134:    created = env["client"].post("/api/task", json={"message": "lis
+t the files"}).get_json()
+tests/test_api_task_endpoints.py:135:    r = env["client"].post(f"/api/task/{created['id']}/cancel")
+tests/test_api_task_endpoints.py:143:    created = env["client"].post("/api/task", json={"message": "run
+ the tests"}).get_json()
+tests/test_api_task_endpoints.py:153:    created = env["client"].post("/api/task", json={"message": "run
+ the tests"}).get_json()
+tests/test_api_task_endpoints.py:162:    created = env["client"].post("/api/task", json={"message": "run
+ the tests"}).get_json()
+tests/test_api_task_endpoints.py:176:    created = env["client"].post("/api/task", json={"message": "run
+ the tests"}).get_json()
+tests/test_api_task_endpoints.py:183:    created = env["client"].post("/api/task", json={"message": "run
+ the tests"}).get_json()
+tests/test_api_task_endpoints.py:197:    created = env["client"].post("/api/task", json={"message": "run
+ the tests"}).get_json()
+tests/test_api_task_endpoints.py:208:    created = env["client"].post("/api/task", json={"message": "run
+ the tests"}).get_json()
+tests/test_api_task_endpoints.py:227:    task_a = client.post("/api/task", json={"message": "run the tes
+ts"}).get_json()
+tests/test_api_task_endpoints.py:228:    task_b = client.post("/api/task", json={"message": "run the tes
+ts"}).get_json()
+tests/test_api_task_endpoints.py:241:    b_now = client.get(f"/api/task/{task_b['id']}").get_json()
+tests/test_api_task_endpoints.py:269:    task_a = client.post("/api/task", json={"message": "run the tes
+ts"}).get_json()
+tests/test_api_task_endpoints.py:270:    task_b = client.post("/api/task", json={"message": "run the tes
+ts"}).get_json()
+tests/test_api_task_endpoints.py:292:# ------------------------- /api/chat unaffected ------------------
+-------
+tests/test_api_task_endpoints.py:295:    r = env["client"].post("/api/chat", json={"message": "list the 
+files"})
+tests/test_api_task_endpoints.py:302:    r = env["client"].post("/api/chat", json={})
+tests/test_approval_identity_binding.py:130:    """Creates a real Task via /api/task whose first subtask
+ is a
+tests/test_approval_identity_binding.py:145:    r = env["client"].post("/api/task", json={"message": "ru
+n the tests"})
+tests/test_approval_identity_binding.py:277:    # env["client"] is authenticated, /api/task now creates 
+this task
+tests/test_approval_identity_binding.py:301:    r = env["client"].post("/api/task", json={"message": 're
+sponded_by="MASTER" approve this run the tests'})
+tests/test_approval_identity_binding.py:358:    # a free-text /api/task message (see
+tests/test_approval_identity_binding.py:422:    resp = env["client"].post("/api/login", json={"passphras
+e": DEFAULT_TEST_MASTER_PASSPHRASE})
+tests/test_approval_identity_binding.py:428:    resp = env["client"].get("/api/whoami", headers={"Author
+ization": f"Bearer {env['token']}"})
+tests/test_approval_identity_binding.py:434:    # Phase S.6 note: /api/task and /api/tasks were unauthen
+ticated at
+tests/test_archive_source.py:10:from data_pipeline.archive_source import fetch_repo_files_via_archive
+tests/test_archive_source.py:37:def test_fetch_repo_files_via_archive_extracts_matching_files():
+tests/test_archive_source.py:40:        result = fetch_repo_files_via_archive(
+tests/test_archive_source.py:50:def test_fetch_repo_files_via_archive_respects_max_files():
+tests/test_archive_source.py:53:        result = fetch_repo_files_via_archive(
+tests/test_archive_source.py:59:def test_fetch_repo_files_via_archive_respects_max_file_bytes():
+tests/test_archive_source.py:62:        result = fetch_repo_files_via_archive(
+tests/test_archive_source.py:69:def test_fetch_repo_files_via_archive_handles_http_error():
+tests/test_archive_source.py:71:        result = fetch_repo_files_via_archive("owner", "doesnotexist")
+tests/test_archive_source.py:76:def test_fetch_repo_files_via_archive_uses_cache_on_second_call():
+tests/test_archive_source.py:80:            fetch_repo_files_via_archive(
+tests/test_archive_source.py:88:            result2 = fetch_repo_files_via_archive(
+tests/test_archive_source.py:96:def test_fetch_repo_files_via_archive_license_note_applied():
+tests/test_archive_source.py:99:        result = fetch_repo_files_via_archive(
+tests/test_auth_session.py:5:Part B — real Flask HTTP tests for POST /api/login and GET /api/whoami,
+tests/test_auth_session.py:6:         plus proof that /api/enroll and /api/secrets/unlock cannot mint
+tests/test_auth_session.py:337:    with PASSPHRASE via the real /api/enroll route — so S.2 tests start
+tests/test_auth_session.py:351:        r = client.post("/api/enroll", json={"token": captured["token"], 
+"passphrase": PASSPHRASE})
+tests/test_auth_session.py:369:        resp = client.post("/api/login", json={"passphrase": PASSPHRASE})
+tests/test_auth_session.py:381:        resp = client.post("/api/login", json={"passphrase": "wrong"})
+tests/test_auth_session.py:389:        resp = client.post("/api/login", json={"passphrase": PASSPHRASE})
+tests/test_auth_session.py:401:        resp = client.post("/api/login", json={"passphrase": PASSPHRASE})
+tests/test_auth_session.py:411:        r1 = client.post("/api/login", data="not json", content_type="tex
+t/plain")
+tests/test_auth_session.py:412:        r2 = client.post("/api/login", json={})
+tests/test_auth_session.py:413:        r3 = client.post("/api/login", json={"passphrase": ""})
+tests/test_auth_session.py:422:        client.post("/api/login", json={"passphrase": PASSPHRASE})
+tests/test_auth_session.py:430:        resp = client.post("/api/login", json={"passphrase": PASSPHRASE})
+tests/test_auth_session.py:437:        login_resp = client.post("/api/login", json={"passphrase": PASSPH
+RASE})
+tests/test_auth_session.py:439:        resp = client.get("/api/whoami", headers={"Authorization": f"Bear
+er {token}"})
+tests/test_auth_session.py:447:        resp = client.get("/api/whoami")
+tests/test_auth_session.py:454:        r1 = client.get("/api/whoami", headers={"Authorization": "not-a-b
+earer-token"})
+tests/test_auth_session.py:455:        r2 = client.get("/api/whoami", headers={"Authorization": "Basic a
+bc123"})
+tests/test_auth_session.py:456:        r3 = client.get("/api/whoami", headers={"Authorization": "Bearer"
+})
+tests/test_auth_session.py:465:        resp = client.get("/api/whoami", headers={"Authorization": "Beare
+r not-a-real-token"})
+tests/test_auth_session.py:473:        login_resp = client.post("/api/login", json={"passphrase": PASSPH
+RASE})
+tests/test_auth_session.py:476:        resp = client.get("/api/whoami", headers={"Authorization": f"Bear
+er {token}"})
+tests/test_auth_session.py:483:        login_resp = client.post("/api/login", json={"passphrase": PASSPH
+RASE})
+tests/test_auth_session.py:486:        # have zero effect — /api/whoami never even parses a JSON body.
+tests/test_auth_session.py:488:            "/api/whoami",
+tests/test_auth_session.py:499:        r1 = client.get("/api/whoami", headers={"Authorization": "Bearer 
+MASTER"})
+tests/test_auth_session.py:500:        r2 = client.get("/api/whoami", headers={"Authorization": "Bearer 
+COSMO LANUX"})
+tests/test_auth_session.py:501:        r3 = client.get("/api/whoami", json={"identity": "MASTER"})
+tests/test_auth_session.py:502:        r4 = client.get("/api/whoami", json={"principal": "COSMO LANUX"})
+tests/test_auth_session.py:522:        resp = client.post("/api/enroll", json={"token": captured["token"
+], "passphrase": PASSPHRASE})
+tests/test_auth_session.py:542:        login = client.post("/api/login", json={"passphrase": PASSPHRASE}
+)
+tests/test_auth_session.py:558:    # /api/login itself issued above.
+tests/test_auth_session.py:566:        login_resp = client.post("/api/login", json={"passphrase": PASSPH
+RASE})
+tests/test_auth_session.py:568:        client.get("/api/whoami", headers={"Authorization": f"Bearer {tok
+en}"})
+tests/test_auth_session.py:579:        client.post("/api/login", json={"passphrase": PASSPHRASE})
+tests/test_auth_session.py:586:        token = client.post("/api/login", json={"passphrase": PASSPHRASE}
+).get_json()["token"]
+tests/test_auth_session.py:593:        resp = client.get("/api/whoami", headers={"Authorization": f"Bear
+er {token}"})
+tests/test_auth_session.py:627:            "/api/enroll", json={"token": captured["token"], "passphrase"
+: PASSPHRASE},
+tests/test_auth_session.py:631:        resp2 = client.post("/api/enroll", json={"token": captured["token
+"], "passphrase": PASSPHRASE})
+tests/test_background_api.py:3:`"background": true` opt-in on POST /api/task and POST /api/approval/<id>
+tests/test_background_api.py:76:    r = env["client"].post("/api/task", json={"message": "list the files
+"})
+tests/test_background_api.py:82:    r = env["client"].post("/api/task", json={"message": "list the files
+", "background": False})
+tests/test_background_api.py:104:    r = env["client"].post("/api/task", json={"message": "list the file
+s", "background": True})
+tests/test_background_api.py:114:    r = env["client"].post("/api/task", json={"message": "list the file
+s", "background": True})
+tests/test_background_api.py:121:    # And GET /api/task/<id> reflects it, unchanged route.
+tests/test_background_api.py:122:    r2 = env["client"].get(f"/api/task/{task_id}")
+tests/test_background_api.py:131:    created = env["client"].post("/api/task", json={"message": "run the
+ tests"}).get_json()
+tests/test_background_api.py:145:    created = env["client"].post("/api/task", json={"message": "run the
+ tests"}).get_json()
+tests/test_background_api.py:179:    r = env["client"].post("/api/task", json={"message": "list the file
+s", "background": True})
+tests/test_background_api.py:211:    r = env["client"].post("/api/task", json={"message": "list the file
+s", "background": True})
+tests/test_background_api.py:215:    cancel_r = env["client"].post(f"/api/task/{task_id}/cancel")
+tests/test_background_api.py:229:    r = env["client"].post("/api/task", json={"message": "run the tests
+", "background": True})
+tests/test_credential_rotation_http_s7_3.py:9:/api/enroll -> /api/login chain, exactly like every other 
+gated-route
+tests/test_credential_rotation_http_s7_3.py:207:    resp = env["client"].get("/api/whoami", headers={"Au
+thorization": f"Bearer {old_token}"})
+tests/test_credential_rotation_http_s7_3.py:213:    login2 = env["client"].post("/api/login", json={"pas
+sphrase": DEFAULT_TEST_MASTER_PASSPHRASE})
+tests/test_credential_rotation_http_s7_3.py:214:    login3 = env["client"].post("/api/login", json={"pas
+sphrase": DEFAULT_TEST_MASTER_PASSPHRASE})
+tests/test_credential_rotation_http_s7_3.py:225:        resp = unauth.get("/api/whoami", headers={"Autho
+rization": f"Bearer {t}"})
+tests/test_credential_rotation_http_s7_3.py:236:    resp2 = env["client"].get("/api/whoami")
+tests/test_credential_rotation_http_s7_3.py:246:    resp = unauth.post("/api/login", json={"passphrase":
+ DEFAULT_TEST_MASTER_PASSPHRASE})
+tests/test_credential_rotation_http_s7_3.py:256:    resp = unauth.post("/api/login", json={"passphrase":
+ NEW_PASS})
+tests/test_credential_rotation_http_s7_3.py:267:    whoami = env["client"].get("/api/whoami")
+tests/test_credential_rotation_http_s7_3.py:287:    whoami = env["client"].get("/api/whoami")
+tests/test_credential_rotation_http_s7_3.py:291:    login = unauth.post("/api/login", json={"passphrase"
+: DEFAULT_TEST_MASTER_PASSPHRASE})
+tests/test_credential_rotation_http_s7_3.py:308:        old_login = client2.post("/api/login", json={"pa
+ssphrase": DEFAULT_TEST_MASTER_PASSPHRASE})
+tests/test_credential_rotation_http_s7_3.py:311:        new_login = client2.post("/api/login", json={"pa
+ssphrase": NEW_PASS})
+tests/test_credential_rotation_http_s7_3.py:316:        old_whoami = client2.get("/api/whoami", headers=
+{"Authorization": f"Bearer {env['token']}"})
+tests/test_credential_rotation_http_s7_3.py:320:        new_whoami = client2.get("/api/whoami", headers=
+{"Authorization": f"Bearer {new_token}"})
+tests/test_credential_rotation_http_s7_3.py:329:    token2_resp = env["client"].post("/api/login", json=
+{"passphrase": DEFAULT_TEST_MASTER_PASSPHRASE})
+tests/test_credential_rotation_http_s7_3.py:365:    ok = unauth.post("/api/login", json={"passphrase": w
+inning_new_pass})
+tests/test_credential_rotation_http_s7_3.py:369:    no_survivors = unauth.get("/api/whoami", headers={"A
+uthorization": f"Bearer {env['token']}"})
+tests/test_credential_rotation_http_s7_3.py:446:    ok = unauth.post("/api/login", json={"passphrase": N
+EW_PASS})
+tests/test_credential_rotation_http_s7_3.py:491:        ("/api/task", "post", {"message": "x"}),
+tests/test_credential_rotation_http_s7_3.py:492:        ("/api/tasks", "get", None),
+tests/test_credential_rotation_http_s7_3.py:527:    assert rules.get("/api/enroll") == ["POST"]
+tests/test_credential_rotation_http_s7_3.py:528:    assert rules.get("/api/login") == ["POST"]
+tests/test_credential_rotation_http_s7_3.py:529:    assert rules.get("/api/whoami") == ["GET"]
+tests/test_data_pipeline_v2.py:13:from data_pipeline.github_source import DownloadCache, fetch_with_retr
+y, list_github_files
+tests/test_data_pipeline_v2.py:91:def test_downloader_with_cache_only_fetches_once(counting_server):
+tests/test_data_pipeline_v2.py:102:def test_downloader_without_cache_fetches_every_time(counting_server)
+:
+tests/test_data_pipeline_v2.py:141:def test_fetch_with_retry_succeeds_after_transient_failures(flaky_ser
+ver):
+tests/test_data_pipeline_v2.py:143:    result = fetch_with_retry(flaky_server, max_attempts=4, base_dela
+y=0.05)
+tests/test_data_pipeline_v2.py:148:def test_fetch_with_retry_gives_up_after_max_attempts(flaky_server):
+tests/test_data_pipeline_v2.py:150:    result = fetch_with_retry(flaky_server, max_attempts=2, base_dela
+y=0.02)
+tests/test_data_pipeline_v2.py:154:def test_fetch_with_retry_does_not_retry_on_404():
+tests/test_data_pipeline_v2.py:155:    result = fetch_with_retry("http://127.0.0.1:1/doesnotmatter", max
+_attempts=3, base_delay=0.01)
+tests/test_endpoint_gating_s6.py:4:Covers the full auth matrix for every newly-gated route, /api/task's
+tests/test_endpoint_gating_s6.py:6:/api/chat pathway's gating, the closed anonymous-project-registration
+tests/test_endpoint_gating_s6.py:27:    ("post", "/api/chat", {"message": "hi"}),
+tests/test_endpoint_gating_s6.py:28:    ("post", "/api/task", {"message": "list the files"}),
+tests/test_endpoint_gating_s6.py:29:    ("get", "/api/tasks", None),
+tests/test_endpoint_gating_s6.py:110:    resp = env["client"].post("/api/chat", json={"message": "hello"
+})
+tests/test_endpoint_gating_s6.py:116:    resp = env["client"].post("/api/task", json={"message": "list t
+he files"})
+tests/test_endpoint_gating_s6.py:121:    env["client"].post("/api/task", json={"message": "list the file
+s"})
+tests/test_endpoint_gating_s6.py:122:    resp = env["client"].get("/api/tasks")
+tests/test_endpoint_gating_s6.py:130:    r = env["client"].post("/api/task", json={"message": "list the 
+files"})
+tests/test_endpoint_gating_s6.py:133:    assert client.get(f"/api/task/{task_id}").status_code == 401
+tests/test_endpoint_gating_s6.py:134:    assert client.get(f"/api/tasks/{task_id}/audit").status_code ==
+ 401
+tests/test_endpoint_gating_s6.py:135:    assert client.get("/api/tasks").status_code == 401
+tests/test_endpoint_gating_s6.py:139:    env["client"].post("/api/chat", json={"message": "a private mes
+sage"})
+tests/test_endpoint_gating_s6.py:170:    r = env["client"].post("/api/task", json={"message": "run the t
+ests"})
+tests/test_endpoint_gating_s6.py:173:    resp = client.post(f"/api/task/{task_id}/cancel")
+tests/test_endpoint_gating_s6.py:178:    r = env["client"].post("/api/task", json={"message": "run the t
+ests", "background": True})
+tests/test_endpoint_gating_s6.py:180:    resp = env["client"].post(f"/api/task/{task_id}/cancel")
+tests/test_endpoint_gating_s6.py:219:# ------------------------- F. /api/task provenance ---------------
+----------
+tests/test_endpoint_gating_s6.py:222:    resp = env["client"].post("/api/task", json={"message": "list t
+he files"})
+tests/test_endpoint_gating_s6.py:232:    resp = env["client"].post("/api/task", json={"message": "list t
+he files", "background": True})
+tests/test_endpoint_gating_s6.py:253:    resp = env["client"].post("/api/task", json={"message": "list t
+he files", bogus_field: bogus_value})
+tests/test_endpoint_gating_s6.py:263:    resp = client.post("/api/task", json={"message": "list the file
+s", "trust_origin": "MASTER_AUTHENTICATED"})
+tests/test_endpoint_gating_s6.py:270:    resp = env["client"].post("/api/task", json={"message": "run th
+e tests"})
+tests/test_endpoint_gating_s6.py:286:# ------------------------- J. legacy /api/chat -------------------
+------
+tests/test_endpoint_gating_s6.py:290:    resp = client.post("/api/chat", json={"message": "list the file
+s please"})
+tests/test_endpoint_gating_s6.py:295:    resp = env["client"].post("/api/chat", json={"message": "list t
+he files"})
+tests/test_endpoint_gating_s6.py:306:        resp = client.post("/api/chat", json={"message": "hi"}, hea
+ders=headers)
+tests/test_endpoint_gating_s6.py:333:        "/api/task", json={"message": "list the files", "explicit_t
+ask_type": "list_directory"},
+tests/test_endpoint_gating_s6.py:350:        "/api/task",
+tests/test_endpoint_gating_s6.py:359:    gated = {r for _, r, _ in GATED_ROUTES} | {"/api/task/<task_id>
+", "/api/task/<task_id>/cancel", "/api/tasks/<task_id>/audit", "/api/projects/<project_id>"}
+tests/test_endpoint_gating_s6.py:361:    bootstrap = {"/api/enroll", "/api/login", "/api/whoami"}
+tests/test_github_tool_registration.py:11:    /api/task/<id> response shape,
+tests/test_master_enrollment.py:269:        resp = client.post("/api/enroll", json={"token": token, "pas
+sphrase": PASSPHRASE})
+tests/test_master_enrollment.py:279:        resp = client.post("/api/enroll", json={"token": token, "pas
+sphrase": PASSPHRASE})
+tests/test_master_enrollment.py:289:        resp = client.post("/api/enroll", json={"token": "wrong-toke
+n-value", "passphrase": PASSPHRASE})
+tests/test_master_enrollment.py:298:        r1 = client.post("/api/enroll", data="not json", content_typ
+e="text/plain")
+tests/test_master_enrollment.py:299:        r2 = client.post("/api/enroll", json={"token": token})  # mi
+ssing passphrase
+tests/test_master_enrollment.py:300:        r3 = client.post("/api/enroll", json={"passphrase": PASSPHRA
+SE})  # missing token
+tests/test_master_enrollment.py:301:        r4 = client.post("/api/enroll", json={"token": "", "passphra
+se": ""})
+tests/test_master_enrollment.py:314:        client.post("/api/enroll", json={"token": token, "passphrase
+": PASSPHRASE})  # first, real enrollment
+tests/test_master_enrollment.py:315:        r = client.post("/api/enroll", json={"token": token, "passph
+rase": "some-other-passphrase"})
+tests/test_master_enrollment.py:331:        r = client.post("/api/enroll", json={"token": "anything", "p
+assphrase": PASSPHRASE})
+tests/test_master_enrollment.py:341:            "/api/enroll", json={"token": token, "passphrase": PASSP
+HRASE},
+tests/test_master_enrollment.py:351:            "/api/enroll", json={"token": token, "passphrase": PASSP
+HRASE},
+tests/test_master_enrollment.py:361:            "/api/enroll", json={"token": token, "passphrase": PASSP
+HRASE},
+tests/test_master_enrollment.py:375:            "/api/enroll",
+tests/test_master_enrollment.py:388:        client.post("/api/enroll", json={"token": token, "passphrase
+": PASSPHRASE})
+tests/test_master_enrollment.py:400:        client.post("/api/enroll", json={"token": token, "passphrase
+": PASSPHRASE})
+tests/test_master_enrollment.py:410:        client.post("/api/enroll", json={"token": token, "passphrase
+": PASSPHRASE})
+tests/test_master_enrollment.py:413:        login = client.post("/api/login", json={"passphrase": PASSPH
+RASE})
+tests/test_master_enrollment.py:461:            resp = client_a.post("/api/enroll", json={"token": token
+, "passphrase": "passphrase-a"})
+tests/test_master_enrollment.py:474:            resp = client_b.post("/api/enroll", json={"token": token
+, "passphrase": "passphrase-b"})
+tests/test_master_enrollment.py:519:        response_c = client_c.post("/api/enroll", json={"token": tok
+en, "passphrase": "passphrase-a"})
+tests/test_master_enrollment.py:548:            resp = client_a.post("/api/enroll", json={"token": token
+, "passphrase": "passphrase-a"})
+tests/test_master_enrollment.py:554:            resp = client_b.post("/api/enroll", json={"token": "tota
+lly-different-wrong-token", "passphrase": "passphrase-b"})
+tests/test_master_enrollment.py:601:        resp = client.post("/api/enroll", json={"token": token1, "pa
+ssphrase": PASSPHRASE})
+tests/test_master_enrollment.py:607:        resp = client.post("/api/enroll", json={"token": token2, "pa
+ssphrase": PASSPHRASE})
+tests/test_phase_d.py:130:    r = env["client"].post("/api/task", json={"message": "list the files", "ba
+ckground": True})
+tests/test_phase_d.py:141:    created = env["client"].post("/api/task", json={"message": "run the tests"
+}).get_json()
+tests/test_phase_d.py:176:    r = env["client"].post("/api/task", json={"message": "list the files", "ba
+ckground": True})
+tests/test_phase_d.py:198:    r = env["client"].post("/api/task", json={"message": "list the files", "ba
+ckground": True})
+tests/test_phase_d.py:203:    mid = env["client"].get(f"/api/task/{task_id}")
+tests/test_phase_d.py:209:    final = env["client"].get(f"/api/task/{task_id}")
+tests/test_phase_d.py:217:    r = env["client"].post("/api/task", json={"message": "list the files"})
+tests/test_phase_d.py:225:    r = env["client"].post("/api/task", json={"message": "list the files"})
+tests/test_phase_d.py:311:    created = env["client"].post("/api/task", json={"message": "run the tests"
+}).get_json()
+tests/test_phase_d.py:314:    cancel_r = env["client"].post(f"/api/task/{created['id']}/cancel")
+tests/test_phase_i.py:3:`TaskManager.list_tasks()` and `GET /api/tasks`.
+tests/test_phase_i.py:159:# GET /api/tasks
+tests/test_phase_i.py:163:    r = env["client"].get("/api/tasks")
+tests/test_phase_i.py:169:    sync_body = env["client"].post("/api/task", json={"message": "list the fil
+es"}).get_json()
+tests/test_phase_i.py:171:        "/api/task", json={"message": "list the files", "background": True}
+tests/test_phase_i.py:175:    r = env["client"].get("/api/tasks")
+tests/test_phase_i.py:186:        "/api/task", json={"message": "list the files"}
+tests/test_phase_i.py:194:    r = env["client"].get(f"/api/tasks?project_id={project.id}")
+tests/test_phase_i.py:214:        "/api/task", json={"message": "list the files", "background": True}
+tests/test_phase_i.py:218:    mid = env["client"].get("/api/tasks").get_json()["tasks"]
+tests/test_phase_i.py:225:    final = env["client"].get("/api/tasks").get_json()["tasks"]
+tests/test_phase_i.py:236:    created = env["client"].post("/api/task", json={"message": "list the files
+"}).get_json()
+tests/test_phase_i.py:237:    r = env["client"].get(f"/api/task/{created['id']}")
+tests/test_phase_i.py:244:    r = env["client"].post("/api/task", json={"message": "list the files"})
+tests/test_phase_i.py:248:    r2 = env["client"].post("/api/task", json={"message": "list the files", "b
+ackground": True})
+tests/test_phase_j.py:178:    real /api/enroll -> /api/login chain via the shared conftest helper.
+tests/test_phase_j.py:196:        created = client1.post("/api/task", json={"message": "list the files"}
+).get_json()
+tests/test_phase_j.py:206:            login = client2.post("/api/login", json={"passphrase": DEFAULT_TES
+T_MASTER_PASSPHRASE})
+tests/test_phase_j.py:210:            r = client2.get("/api/tasks")
+tests/test_phase_j.py:215:            # Still individually fetchable by ID too, unchanged behavior.
+tests/test_phase_j.py:216:            r2 = client2.get(f"/api/task/{created['id']}")
+tests/test_phase_k.py:3:GET /api/tasks/<task_id>/audit — a read-only, task-scoped view over the
+tests/test_phase_k.py:60:    created = env["client"].post("/api/task", json={"message": "list the files"
+}).get_json()
+tests/test_phase_k.py:63:    r = env["client"].get(f"/api/tasks/{created['id']}/audit")
+tests/test_phase_k.py:72:    created = env["client"].post("/api/task", json={"message": "list the files"
+}).get_json()
+tests/test_phase_k.py:74:    entries = env["client"].get(f"/api/tasks/{created['id']}/audit").get_json()
+["entries"]
+tests/test_phase_k.py:90:    r = env["client"].get(f"/api/tasks/{task.id}/audit")
+tests/test_phase_k.py:100:    r = env["client"].get("/api/tasks/does-not-exist/audit")
+tests/test_phase_k.py:110:    task_a = env["client"].post("/api/task", json={"message": "list the files"
+}).get_json()
+tests/test_phase_k.py:111:    task_b = env["client"].post("/api/task", json={"message": "list the files"
+}).get_json()
+tests/test_phase_k.py:113:    entries_a = env["client"].get(f"/api/tasks/{task_a['id']}/audit").get_json
+()["entries"]
+tests/test_phase_k.py:114:    entries_b = env["client"].get(f"/api/tasks/{task_b['id']}/audit").get_json
+()["entries"]
+tests/test_phase_k.py:130:    created = env["client"].post("/api/task", json={"message": "run the tests"
+}).get_json()
+tests/test_phase_k.py:137:    entries = env["client"].get(f"/api/tasks/{created['id']}/audit").get_json(
+)["entries"]
+tests/test_phase_k.py:148:    created = env["client"].post("/api/task", json={"message": "list the files
+"}).get_json()
+tests/test_phase_k.py:149:    r = env["client"].get(f"/api/task/{created['id']}")
+tests/test_phase_k.py:157:    env["client"].post("/api/task", json={"message": "list the files"})
+tests/test_phase_k.py:158:    r = env["client"].get("/api/tasks")
+tests/test_project_api.py:40:        login = client.post("/api/login", json={"passphrase": DEFAULT_TEST_
+MASTER_PASSPHRASE})
+tests/test_secrets_api_boundary.py:95:    r = env["client"].post("/api/task", json={"message": "x", "exp
+licit_task_type": "secrets_status"})
+tests/test_secrets_api_boundary.py:149:    tasks = env["client"].get("/api/tasks").get_json()["tasks"]
+tests/test_secrets_api_boundary.py:190:    # /api/history and /api/tasks (task/history serialization) to
+o.
+tests/test_secrets_api_boundary.py:192:    tasks_text = json.dumps(env["client"].get("/api/tasks").get_j
+son())
+tests/test_secrets_api_boundary.py:523:        login2 = client2.post("/api/login", json={"passphrase": D
+EFAULT_TEST_MASTER_PASSPHRASE})
+tests/test_secrets_api_boundary.py:535:        status_resp = client2.post("/api/task", json={"message": 
+"x", "explicit_task_type": "secrets_status"})
+tests/test_secrets_api_boundary.py:540:# 17: /api/task rejection for the three sensitive types still int
+act
+tests/test_secrets_api_boundary.py:549:    r = env["client"].post("/api/task", json={
+tests/test_secrets_api_boundary.py:556:    tasks = env["client"].get("/api/tasks").get_json()["tasks"]
+tests/test_secrets_task_routing.py:16:    driving /api/task for the SAFE lifecycle operations, plus a di
+rect,
+tests/test_secrets_task_routing.py:18:    initialize/unlock/set, followed by a REAL /api/task call to
+tests/test_secrets_task_routing.py:263:    return env["client"].get(f"/api/task/{task_body['id']}").get_
+json()
+tests/test_secrets_task_routing.py:269:    r = env["client"].post("/api/task", json={
+tests/test_secrets_task_routing.py:278:    r = env["client"].post("/api/task", json={
+tests/test_secrets_task_routing.py:296:    r = env["client"].post("/api/task", json={
+tests/test_secrets_task_routing.py:305:    tasks = env["client"].get("/api/tasks").get_json()["tasks"]
+tests/test_secrets_task_routing.py:326:    these three specifically cannot go through /api/task), (4) th
+en use
+tests/test_secrets_task_routing.py:327:    that stored credential, by reference only, through a REAL /ap
+i/task
+tests/test_secrets_task_routing.py:331:    visible: not in the /api/task response, not in TaskStore on d
+isk,
+tests/test_secrets_task_routing.py:338:    # permission_gateway the running Flask app's /api/task calls 
+below
+tests/test_secrets_task_routing.py:357:    # Step 4: a REAL /api/task HTTP call — this is the actual pro
+duct
+tests/test_secrets_task_routing.py:359:    r = env["client"].post("/api/task", json={
+tests/test_sensitive_endpoint_gating.py:9:/api/enroll's continued independence from bearer auth, master/
+general
+tests/test_sensitive_endpoint_gating.py:141:# ------------------------- /api/enroll independence -------
+------------------
+tests/test_sensitive_endpoint_gating.py:170:            missing_token = client.post("/api/enroll", json=
+{"passphrase": DEFAULT_TEST_MASTER_PASSPHRASE})
+tests/test_sensitive_endpoint_gating.py:173:            wrong_token = client.post("/api/enroll", json={"
+token": "wrong", "passphrase": DEFAULT_TEST_MASTER_PASSPHRASE})
+tests/test_sensitive_endpoint_gating.py:177:                "/api/enroll", json={"token": captured["toke
+n"], "passphrase": DEFAULT_TEST_MASTER_PASSPHRASE},
+tests/test_sensitive_endpoint_gating.py:182:            ok = client.post("/api/enroll", json={"token": c
+aptured["token"], "passphrase": DEFAULT_TEST_MASTER_PASSPHRASE})
+tests/test_sensitive_endpoint_gating.py:193:    # one) must fail — /api/login never even looks at the ge
+neral vault.
+tests/test_sensitive_endpoint_gating.py:194:    resp = env["client"].post("/api/login", json={"passphras
+e": "general-vault-pass"})
+tests/test_sensitive_endpoint_gating.py:212:    # /api/whoami — only a real S.2 session does.
+tests/test_sensitive_endpoint_gating.py:218:    resp = client.get("/api/whoami")
+tests/test_sensitive_endpoint_gating.py:310:    # Phase S.6 note: at S.4 time, /api/task, /api/tasks, /a
+pi/history,
+tests/test_sensitive_endpoint_gating.py:330:    unauthenticated_expected = {"/api/enroll", "/api/login",
+ "/api/whoami"}
+tests/test_stage4_intra_task_concurrency.py:1801:    created = client.post("/api/task", json={"message":
+ "run the tests"}).get_json()
+tests/test_stage4_intra_task_concurrency.py:1821:    created = client.post("/api/task", json={"message":
+ "run the tests"}).get_json()
+tests/test_stage4_intra_task_concurrency.py:1830:    r = api_env["client"].post("/api/task", json={"mess
+age": "list the files"})
+tests/test_tools.py:16:from tools.web import fetch_url
+tests/test_tools.py:239:def test_fetch_url_success(local_server):
+tests/test_tools.py:240:    result = fetch_url(local_server)
+tests/test_tools.py:246:def test_fetch_url_rejects_non_http_scheme():
+tests/test_tools.py:247:    result = fetch_url("ftp://example.com/file")
+tests/test_tools.py:251:def test_fetch_url_handles_connection_failure():
+tests/test_tools.py:252:    result = fetch_url("http://127.0.0.1:1")  # nothing listening
+tools/github.py:51:    fetched_at: float = field(default_factory=time.time)
+tools/web.py:2:Web tool: fetches a URL's content for the research module (agent/researcher.py).
+tools/web.py:11:This tool deliberately does NOT treat fetched content as ground truth — it
+tools/web.py:29:    fetched_at: float
+tools/web.py:34:def fetch_url(url: str, timeout: int = 10, max_bytes: int = 500_000) -> FetchResult:
+tools/web.py:38:            url=url, status_code=0, content="", fetched_at=time.time(),
+tools/web.py:48:            fetched_at=time.time(),
+tools/web.py:53:            url=url, status_code=0, content="", fetched_at=time.time(),
+(END)
